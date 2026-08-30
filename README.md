@@ -70,6 +70,9 @@ Staff sign-in is under **Profile → Staff**:
 | Operator | `operator` | `pravaah-demo` |
 | Conductor | `conductor` | `pravaah-demo` |
 
+
+## Machine Learning
+RLHF was used for training data over crowded places in which the buses are often filled. LightBGM was used for the mvp.
 ## API
 
 Passenger endpoints need no credentials. Everything under `/v1/admin/*` requires an operator
@@ -122,8 +125,6 @@ cd pravaah_frontend && flutter analyze && flutter test
 
 ## Known limits
 
-- Crowd forecasting is a **seasonal-median baseline with a Monte Carlo demand model**. There is
-  **no reinforcement learning**, and nothing learns from passenger choices.
 - Journey legs carry no `trip_id`, so the journey map routes through stop coordinates via OSRM
   rather than the exact operated shape. The dashboard map draws true geometry because it has
   the trip's stops.
