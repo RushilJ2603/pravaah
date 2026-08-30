@@ -240,7 +240,7 @@ def _b64decode(value: str) -> bytes:
 def _unauthorized(message: str) -> HTTPException:
     return HTTPException(
         status_code=401,
-        detail={"code": ErrorCode.INTERNAL.value, "message": message},
+        detail={"code": ErrorCode.UNAUTHORIZED.value, "message": message},
         headers={"WWW-Authenticate": "Bearer"},
     )
 
@@ -248,7 +248,7 @@ def _unauthorized(message: str) -> HTTPException:
 def _forbidden(message: str) -> HTTPException:
     return HTTPException(
         status_code=403,
-        detail={"code": ErrorCode.INTERNAL.value, "message": message},
+        detail={"code": ErrorCode.FORBIDDEN.value, "message": message},
     )
 
 

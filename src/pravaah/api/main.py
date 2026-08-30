@@ -45,7 +45,14 @@ app = FastAPI(
 # so this matters only for local development against a Vite dev server.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+    # Any localhost port (Flutter's web dev server picks a random one each run,
+    # and pinning 5173 silently broke every browser request the app made), plus
+    # Cloudflare quick tunnels, which hand out a fresh random hostname on every
+    # restart -- so an exact-origin allowlist can never work for them.
+    allow_origin_regex=(
+        r"http://(localhost|127\.0\.0\.1)(:\d+)?"
+        r"|https://[a-z0-9][a-z0-9-]*\.trycloudflare\.com"
+    ),
     allow_methods=["GET", "POST"],
     allow_headers=["*"],
 )

@@ -43,3 +43,6 @@ desktop.ini
 .idea/
 .vscode/*
 !.vscode/extensions.json
+
+# Ephemeral Cloudflare quick-tunnel hostname
+.tunnel-url

@@ -1233,6 +1233,8 @@ SIH/
 │       ├── passenger.py
 │       ├── admin.py
 │       └── stream.py
+├── scripts/
+│   └── demo.sh                      ← one-command demo stack (§19)
 ├── migrations/                      ← SQL migrations, forward-only
 ├── tests/
 │   ├── unit/
@@ -1804,7 +1806,7 @@ When the request carries a valid shift token the observation is stored with `sou
 {"error": {"code": "NO_ROUTE_FOUND", "message": "...", "request_id": "..."}}
 ```
 
-Codes: `NO_ROUTE_FOUND`, `INVALID_COORDINATES`, `OUT_OF_SERVICE_AREA`, `FEED_UNAVAILABLE`, `RATE_LIMITED`, `INTERNAL`, `SHIFT_NOT_ACTIVE`, `VEHICLE_ALREADY_CLAIMED`.
+Codes: `NO_ROUTE_FOUND`, `INVALID_COORDINATES`, `OUT_OF_SERVICE_AREA`, `FEED_UNAVAILABLE`, `RATE_LIMITED`, `INTERNAL`, `SHIFT_NOT_ACTIVE`, `VEHICLE_ALREADY_CLAIMED`, `UNAUTHORIZED` (401 -- absent or invalid credentials), `FORBIDDEN` (403 -- authenticated, but the role or shift does not permit this).
 
 ### 29.5 Conductor endpoints
 
@@ -2246,6 +2248,10 @@ navigation apps have no incentive to build.
 | 2026-08-30 | §28.9: simulator parameters must be **measured from a real corpus**, not chosen; calibration must deduplicate on `(vehicle_id, vehicle_ts)` first | Invented multipliers are indistinguishable from making the data up. Fitting on the raw corpus would triple-count the 2026-08-28→08-30 window where three recorders ran concurrently, biasing every fitted parameter | Owner |
 | 2026-08-30 | §31: added **Slice H — Delhi demo substrate**, explicitly parallel to B/C and explicitly barred from producing headline accuracy numbers | Keeps the simulator off the critical path of the actual product, and prevents a model trained and evaluated on synthetic labels from being quoted as a result | Owner |
 | 2026-08-30 | §19.1: the demo is now **two cities with two jobs** — Delhi demonstrates, Boston evidences | Answers "why American data?" honestly while keeping the accuracy claim attached to the only real occupancy labels that exist in the project | Owner |
+
+| 2026-08-30 | §29.4: added `UNAUTHORIZED` and `FORBIDDEN` error codes | Auth failures were serializing as `INTERNAL`, so a client could not distinguish "log in again" from "the server broke". Both are ordinary outcomes of a role-gated API and need their own codes | Owner |
+
+| 2026-08-30 | §25: added `scripts/demo.sh` | The demo took six manual steps, each with an environment trap (Windows interpreter, WSLENV, running from `src/`, a 25 s health wait). A demo that cannot be started reliably is not a demo | Owner |
 
 > **To propose a change:** add a row here with the date, the change, the rationale and a blank
 > Approved column; edit the relevant section; and raise it with the project owner. Do not write
