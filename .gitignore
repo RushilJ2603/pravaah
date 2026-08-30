@@ -1,0 +1,45 @@
+# ── Recorded feed data — NEVER commit ─────────────────────────
+# ~1.2 GB and growing ~35 MB/hour while the recorder runs.
+# This data is irreplaceable but belongs in object storage, not git.
+data/*.csv
+data/*.zip
+data/recorder.log
+data/raw/
+data/parquet/
+data/derived/
+
+# ── Python ────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# ── Node / frontend ───────────────────────────────────────────
+node_modules/
+dist/
+build/
+.next/
+
+# ── Secrets & local config ────────────────────────────────────
+.env
+.env.*
+!.env.example
+
+# ── ML artifacts ──────────────────────────────────────────────
+mlruns/
+models/*.txt
+models/*.pkl
+models/*.joblib
+!models/.gitkeep
+
+# ── OS / editor ───────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+.idea/
+.vscode/*
+!.vscode/extensions.json
