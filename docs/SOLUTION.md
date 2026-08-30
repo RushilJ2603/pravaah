@@ -732,6 +732,7 @@ Executable DDL is in §27.
 |---|---|---|
 | GET | `/v1/plan` | Ranked itineraries for origin/destination/time/preference. |
 | GET | `/v1/trips/{tripId}/forecast` | Crowd + ETA forecast by upcoming stop. |
+| GET | `/v1/vehicles` | Fleet inside a viewport bounding box. **`bbox` is required** and the result is capped server-side (§12.4 rule 5). |
 | GET | `/v1/vehicles/{vehicleId}` | Current vehicle state and freshness. |
 | GET | `/v1/stops/{stopId}/departures` | Predicted upcoming departures with crowd status. |
 | POST | `/v1/occupancy/report` | Submit a passenger crowd observation. |
@@ -1628,7 +1629,45 @@ Query: `origin=lat,lon` · `destination=lat,lon` · `depart_at` (ISO 8601, optio
 are always present; `reasons` is never empty; a missing crowd forecast serializes as
 `"class": "UNKNOWN"` with a null quantile block, never as zeros.
 
-### 29.2 `POST /v1/occupancy/report`
+### 29.2 `GET /v1/vehicles`
+
+Query: `bbox=minLat,minLon,maxLat,maxLon` (**required**) · `limit` (default 500, server cap 2000).
+
+Omitting `bbox` is a `400 INVALID_COORDINATES`, not a full-fleet response. The whole point of
+the parameter is that a city-wide payload is never reachable by accident (§12.4 rule 5, §16.3).
+
+```json
+{
+  "generated_at": "2026-08-30T12:04:11+05:30",
+  "city_id": "mbta",
+  "count": 42,
+  "vehicles": [{
+    "vehicle_id": "y2075",
+    "trip_id": "76789790",
+    "route_id": "64",
+    "direction_id": 0,
+    "lat": 42.364510, "lon": -71.113419,
+    "bearing": 270.0,
+    "speed_mps": 9.3,
+    "stop_id": "1064",
+    "current_status": "IN_TRANSIT_TO",
+    "occupancy_class": "MANY_SEATS_AVAILABLE",
+    "occupancy_ratio": 0.42,
+    "ts": "2026-08-30T06:33:28+00:00",
+    "age_s": 18,
+    "is_stale": false,
+    "source_type": "PUBLIC_FEED",
+    "quality_score": 0.96
+  }]
+}
+```
+
+**Response invariants.** `age_s` and `is_stale` are always present, so a client can render the
+freshness badge §33.3 rule 4 requires without computing clock skew itself. `occupancy_class` is
+always present and is `"UNKNOWN"` when the vehicle reported nothing — never omitted, never
+`"EMPTY"`, and `occupancy_ratio` is null in that case (§12.4 rule 3).
+
+### 29.3 `POST /v1/occupancy/report`
 
 ```json
 {"trip_id":"...","vehicle_id":"...","occupancy_class":"STANDING_ROOM_ONLY","reported_at":"..."}
@@ -1637,7 +1676,7 @@ are always present; `reasons` is never empty; a missing crowd forecast serialize
 Rate-limited per session. Stored with `source_type=CROWDSOURCED` and a confidence derived by
 §8.3. Never overrides a fresh `APC` or `REAL_OPERATOR` observation.
 
-### 29.3 Error shape
+### 29.4 Error shape
 
 ```json
 {"error": {"code": "NO_ROUTE_FOUND", "message": "...", "request_id": "..."}}
@@ -1966,6 +2005,7 @@ navigation apps have no incentive to build.
 | 2026-08-30 | **§31 restructured into vertical slices** (Slice 0/A/B/C/D/E/F) with a §31.1 traceability table back to §20 | A strict P0-P7 march leaves nothing visible or deployable until most of the work is done. Slices ship end to end and deploy early; later slices deepen what earlier ones stubbed | Owner |
 | 2026-08-30 | **§33 added: frontend specification** | The frontend was named in §25 and §23 but had no specification and only one incidental gate across 17 phase rows. It is a working application, so its data-state rules (unknown is never empty, uncertainty always visible, reasons always shown) are binding | Owner |
 | 2026-08-30 | **§14.4 added: public demo deployment on a single VM** | Deployment was absent from the build order entirely. One VM running the existing Compose stack keeps §27 unchanged, since TimescaleDB is unavailable on most managed free tiers. The offline replay requirement is retained, not replaced | Owner |
+| 2026-08-30 | **§12.1 and §29.2: added `GET /v1/vehicles` with a required bbox** | §33.2 mandates a live map and §12.4 rule 5 mandates viewport queries, but the passenger API only exposed a single-vehicle lookup, so the map could not be built from the contract as written. The operator API stays separate and RBAC-gated | Owner |
 
 > **To propose a change:** add a row here with the date, the change, the rationale and a blank
 > Approved column; edit the relevant section; and raise it with the project owner. Do not write
