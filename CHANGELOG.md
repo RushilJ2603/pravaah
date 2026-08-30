@@ -16,6 +16,104 @@
 #
 # ──────────────────────────────────────────────────────────────
 
+## [2026-08-30 15:10 IST] — Conductor mode, staff auth and a trained model land (Codex); full build verified | By: AI
+
+### Done This Session
+- **Codex completed the two outstanding features.** `api/auth.py` (pbkdf2 password hashing,
+  HMAC-signed bearer tokens, `require_conductor` / `require_operator` dependencies),
+  `api/conductor.py` (shift start / position / end, occupancy report), `models/registry.py`
+  (serving-model selection with fallback), `migrations/005_auth.sql` (`app_user`,
+  `conductor_shift`, and the partial unique index that makes the vehicle claim concurrency-safe),
+  `migrations/006_schedule_indexes.sql`, and six new test files.
+- **The model is genuinely trained and wired.** `config/models/baseline_v1.json`: 48,766 train /
+  12,192 test rows on a **chronological** split, band coverage 0.87, MAE 0.153, pinball losses
+  recorded. Served through the registry; the live API reports
+  `model_version: "seasonal_median_v1+simulated"`. The artifact stamps itself
+  `real_world_accuracy: false` and `SIMULATOR_PERFORMANCE_ONLY_NOT_REAL_WORLD_ACCURACY`, so §6.5
+  is enforced by the file rather than by a docstring.
+- **Verified the whole build rather than trusting the file list**: 124 unit + 75 integration
+  tests pass, ruff clean, all four routers registered, migrations applied, and every endpoint
+  group smoke-tested against a running server.
+- **Measured model coverage**: 100% at the (hour, position) level with zero fallback; 71% of
+  route-hour combinations have learned history. Training history is 60,958 rows spanning 2 days
+  with all 24 hours covered evenly.
+- **Produced the demo plan** — a six-beat script built around the crowd band at the boarding stop,
+  with a rehearsed disclosure that turns the synthetic-data question into the conductor
+  cold-start story.
+
+### Errors Hit
+- **The context docs I wrote earlier in this session became actively wrong.** They stated "NO
+  TRAINED MODEL" and "conductor mode is NOT built"; both were false once Codex's work landed.
+  Rewritten against a live verification pass instead of from memory. A stale doc is tolerable; a
+  confidently false one is not.
+- **I misread `is_fallback: true`** as "the model has no data for this cell". It actually means
+  "answered from a coarser key than route-specific". Measured properly: zero fallback at the
+  (hour, position) level.
+- **Found the demo blocker**: `app_user` is empty and `provision_user()` has no CLI, so login
+  always fails and every `/v1/admin/*` route 401s. Operator and conductor are built, tested, and
+  unreachable. Not yet fixed.
+- **Auth failures serialize as `{"code":"INTERNAL"}`** — `ErrorCode` has no `UNAUTHORIZED` or
+  `FORBIDDEN`. Not yet fixed.
+
+### Next Session Must
+- **Clock control** — `deps.now()` and the simulator use real time, so only the current hour is
+  demonstrable. This blocks the "normal day" demo entirely and is the highest-value item.
+- **Seed staff accounts** over the existing `provision_user()`.
+- Add `UNAUTHORIZED` / `FORBIDDEN` to `ErrorCode`.
+- One-command demo runner; refresh `docs/FRONTEND_HANDOFF.md` from rev 4 (5 of 14 endpoints).
+
+---
+
+## [2026-08-30 13:35 IST] — Delhi pivot: synthetic simulator, occupancy fix, forecast, planner and operator API | By: AI
+
+### Done This Session
+- **Fixed the occupancy pipeline.** Occupancy was decoded from the feed and then silently dropped
+  — `worker.py` only handled `snapshot.positions` — so every API response returned
+  `occupancy_class: UNKNOWN` despite real coverage. Added `LatestOccupancyState`, wired the worker
+  to write occupancy to Redis and Postgres, joined it in the API. **Verified live**: a vehicle
+  returned `STANDING_ROOM_ONLY` with ratio 0.61. The rejected-position test is mutation-verified.
+- **Pivoted the demo city to Delhi, fully synthetic.** New `sim/` package: `network.py` (51 routes
+  over 490 stops, 61 real Delhi places at real coordinates on real arterial corridors),
+  `demand.py` (behavioural board/alight with conservation and crush clipping), `generate.py`
+  (emits canonical events tagged `SIMULATED`), `persist.py` (writes the network as
+  **feed_version 6** — 8,568 trips, 113,568 stop_times), `calibrate.py` (fits shape from a real
+  corpus).
+- **Removed Boston from every shipped artifact.** `mbta_v1.json` deleted, replaced by
+  `delhi_v1.json` carrying only the fitted load curve and Delhi assumptions.
+- **Built the forecast**: `models/crowd.py` Monte Carlos the demand model into p10/p50/p90 by
+  hour and position. 09:00 peak = crushed/crushed/full (72/91/100 onboard); 22:00 = few-seats/
+  standing (28/40/55).
+- **Six new endpoints**: `/v1/trips/{id}/forecast`, `/v1/plan` (4 preference profiles, reason
+  codes, deterministic candidates), `/v1/admin/hotspots` (severity + lead time),
+  `/v1/admin/routes/{id}/forecast`, `/v1/admin/vehicles`, `/v1/admin/data-health`.
+- **Made departures work** — needed the network in Postgres plus a pool-timeout fix.
+- **Amended `docs/SOLUTION.md`** (Appendix C): §28.9 simulator module spec, §31 Slice H, §19.1
+  two-city demo, and the earlier Flutter/conductor/auth batch.
+- 111 unit tests pass, ruff clean.
+
+### Errors Hit
+- **My first calibration silently presented defaults as measurements.** Every unmeasured hour came
+  back `1.0`, indistinguishable from a measured average. Rewrote to return `null` for unmeasured
+  hours, swapped mean-ordinal for crowding incidence, and added `fit_warnings` recording that the
+  corpus spans only 1.6 days with 7/24 weekday hours fittable.
+- **Every schedule endpoint had been returning 503 for the process lifetime** — the connection
+  pool gave up after 5 s, shorter than the WSL→Docker hop. Raised to 30 s.
+- **`/v1/admin/hotspots` did not return within five minutes.** A CTE using
+  `trip_id IN (SELECT DISTINCT trip_id FROM win)` produced a pathological plan. Replaced with two
+  simple queries and a dict join in Python, plus two indexes.
+- **agy delegation failed twice** with `timeout waiting for response`; the repo is on a Windows
+  mount over the WSL 9p bridge. Wrote the tests by hand instead.
+- Delhi GTFS host `traffickarma.iiitd.edu.in:9010` refused connections, so the network is
+  synthetic rather than imported.
+
+### Next Session Must
+- Build **conductor mode** (Slice G): migration 005, `POST /v1/auth/login`, shift lifecycle.
+- **Actually train a model** — accumulate `occupancy_observation` history and fit
+  `models/baseline.py`. The current forecast is simulation, not learning.
+- Add tests for forecast, plan and admin — all hand-verified only.
+
+---
+
 ## [2026-08-30 09:45 IST] — Slice A.1–A.3 built; pushed to a private GitHub repo | By: AI
 
 ### Done This Session

@@ -13,7 +13,11 @@ import pytest
 
 from pravaah.adapters.base import FeedSnapshot, RealtimeAdapter
 from pravaah.config import load_city
-from pravaah.contracts.events import VehiclePositionEvent
+from pravaah.contracts.events import (
+    OccupancyClass,
+    OccupancyObservation,
+    VehiclePositionEvent,
+)
 from pravaah.contracts.provenance import Provenance, SourceType
 from pravaah.ingest.worker import IngestWorker
 
@@ -166,3 +170,115 @@ def test_stop_ends_the_loop(city):
     worker.stop()
     worker.run(interval_s=1, max_cycles=10)
     assert worker.cycles == 0
+
+
+def occupancy(vehicle_id="y1", ts=None) -> OccupancyObservation:
+    ts = ts or datetime.now(UTC)
+    return OccupancyObservation(
+        city_id="mbta",
+        vehicle_id=vehicle_id,
+        ts=ts,
+        occupancy_class=OccupancyClass.MANY_SEATS_AVAILABLE,
+        confidence=1.0,
+        provenance=Provenance(
+            source_type=SourceType.PUBLIC_FEED,
+            source_name="mbta_cdn",
+            source_timestamp=ts,
+            ingest_timestamp=ts,
+            quality_score=1.0,
+        ),
+    )
+
+def test_occupancy_written_for_accepted_vehicles(city):
+    state = FakeState()
+    occ_state = FakeState()
+    worker = IngestWorker(
+        FakeAdapter(
+            city,
+            [FeedSnapshot(
+                feed_timestamp=T0,
+                positions=[position("y1")],
+                occupancies=[
+                occupancy("y1")
+            ],
+            )],
+        ),
+        city,
+        state=state,
+        occupancy=occ_state,
+    )
+    worker.cycle()
+    assert len(occ_state.written) == 1
+    assert occ_state.written[0].vehicle_id == "y1"
+
+def test_rejected_positions_do_not_write_occupancy(city):
+    state = FakeState()
+    occ_state = FakeState()
+    worker = IngestWorker(
+        FakeAdapter(city, [FeedSnapshot(
+            feed_timestamp=T0,
+            positions=[position("good"), position("bad", lat=28.61, lon=77.23)],
+            occupancies=[occupancy("good"), occupancy("bad")]
+        )]),
+        city,
+        state=state,
+        occupancy=occ_state,
+    )
+    worker.cycle()
+    assert [o.vehicle_id for o in occ_state.written] == ["good"]
+    assert worker.occupancy_total == 1
+
+def test_zero_occupancies_does_not_error(city):
+    state = FakeState()
+    occ_state = FakeState()
+    worker = IngestWorker(
+        FakeAdapter(
+            city,
+            [FeedSnapshot(
+                feed_timestamp=T0,
+                positions=[position("y1")],
+                occupancies=[
+            ],
+            )],
+        ),
+        city,
+        state=state,
+        occupancy=occ_state,
+    )
+    worker.cycle()
+    assert len(occ_state.written) == 0
+    assert worker.occupancy_total == 0
+
+def test_occupancy_total_counts_only_retained(city):
+    state = FakeState()
+    occ_state = FakeState()
+    worker = IngestWorker(
+        FakeAdapter(city, [FeedSnapshot(
+            feed_timestamp=T0,
+            positions=[position("good"), position("bad", lat=28.61, lon=77.23)],
+            occupancies=[occupancy("good"), occupancy("bad")]
+        )]),
+        city,
+        state=state,
+        occupancy=occ_state,
+    )
+    worker.cycle()
+    assert worker.occupancy_total == 1
+
+def test_worker_without_occupancy_state_runs_fine(city):
+    state = FakeState()
+    worker = IngestWorker(
+        FakeAdapter(city, [FeedSnapshot(
+            feed_timestamp=T0,
+            positions=[position("y1")],
+            occupancies=[
+                occupancy("y1")
+            ]
+        )]),
+        city,
+        state=state,
+        occupancy=None,
+    )
+    worker.cycle()
+    assert worker.accepted_total == 1
+    assert worker.occupancy_total == 1

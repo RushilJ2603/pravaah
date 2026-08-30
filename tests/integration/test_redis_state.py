@@ -15,9 +15,9 @@ from datetime import UTC, datetime, timedelta
 import pytest
 
 from pravaah.config import load_settings
-from pravaah.contracts.events import VehiclePositionEvent
+from pravaah.contracts.events import OccupancyClass, OccupancyObservation, VehiclePositionEvent
 from pravaah.contracts.provenance import Provenance, SourceType
-from pravaah.state.redis_state import LatestVehicleState
+from pravaah.state.redis_state import LatestOccupancyState, LatestVehicleState
 
 redis_lib = pytest.importorskip("redis", reason="redis client not installed")
 
@@ -194,3 +194,62 @@ def test_state_is_reconstructible_after_a_flush(state, client):
     state.put_many(events)
     assert state.count() == 20
     assert state.get("y0", now=T0) == events[0]
+
+
+
+@pytest.fixture
+def occ_state(client):
+    s = LatestOccupancyState(client, CITY)
+    s.clear()
+    yield s
+    s.clear()
+
+def occupancy(
+    vehicle_id="y1",
+    ts=T0,
+    occ_class=OccupancyClass.MANY_SEATS_AVAILABLE,
+    ratio=0.2,
+) -> OccupancyObservation:
+    return OccupancyObservation(
+        city_id=CITY,
+        vehicle_id=vehicle_id,
+        ts=ts,
+        occupancy_class=occ_class,
+        occupancy_ratio=ratio,
+        confidence=1.0,
+        provenance=Provenance(
+            source_type=SourceType.PUBLIC_FEED,
+            source_name="mbta_cdn",
+            source_timestamp=ts,
+            ingest_timestamp=ts,
+            quality_score=1.0,
+        ),
+    )
+
+def test_occupancy_round_trips_fields_unchanged(occ_state):
+    original = occupancy(occ_class=OccupancyClass.FEW_SEATS_AVAILABLE, ratio=0.8)
+    occ_state.put_many([original])
+    loaded = occ_state.get_many(["y1"], now=T0)
+    assert "y1" in loaded
+    assert loaded["y1"].occupancy_class == OccupancyClass.FEW_SEATS_AVAILABLE
+    assert loaded["y1"].occupancy_ratio == 0.8
+
+def test_get_many_missing_omits_entry_does_not_invent_empty(occ_state):
+    occ_state.put_many([occupancy("y1")])
+    loaded = occ_state.get_many(["y1", "nope"], now=T0)
+    assert "y1" in loaded
+    assert "nope" not in loaded
+
+def test_expired_occupancy_is_absent_and_pruned(occ_state):
+    occ_state.put_many([occupancy("y1", ts=T0), occupancy("old", ts=T0 - timedelta(hours=2))])
+    loaded = occ_state.get_many(["y1", "old"], now=T0)
+    assert "y1" in loaded
+    assert "old" not in loaded
+    assert occ_state.count() == 1
+
+def test_get_many_empty_returns_empty_without_redis(occ_state, monkeypatch):
+    def block_redis(*args, **kwargs):
+        raise AssertionError("Should not call Redis")
+    monkeypatch.setattr(occ_state.redis, "hmget", block_redis)
+    loaded = occ_state.get_many([], now=T0)
+    assert loaded == {}

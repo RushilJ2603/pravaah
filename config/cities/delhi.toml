@@ -35,7 +35,12 @@ available = false
 coverage_estimate = 0.0
 
 [capacity]
-default_bus_capacity = 50
+# ASSUMPTION -- reported Urban Bus Specification figures for a 12m Indian city
+# bus. The primary MoHUA document was NOT confirmed; replace with sourced values
+# before any claim rests on these (Slice H.2 gate).
+default_bus_capacity = 100      # dense crush load, structural maximum
+seated_capacity = 35
+peak_capacity = 70              # seated + normal standing
 default_rail_capacity = 300
 
 [validation]

@@ -24,7 +24,7 @@ from __future__ import annotations
 import logging
 from datetime import UTC, datetime
 
-from ..contracts.events import VehiclePositionEvent
+from ..contracts.events import OccupancyObservation, VehiclePositionEvent
 
 log = logging.getLogger(__name__)
 
@@ -231,6 +231,105 @@ class LatestVehicleState:
         pipe.hdel(self._hash_key, *vehicle_ids)
         pipe.zrem(self._geo_key, *vehicle_ids)
         pipe.execute()
+
+
+class LatestOccupancyState:
+    """Latest crowding observation per vehicle.
+
+    Kept in its own hash `pravaah:{city}:occupancy` rather than folded into the
+    position event, for two reasons that matter later:
+
+    * **Different cadence.** A vehicle reports a position on every poll but
+      occupancy on only some of them (~61% for MBTA). Merging them would force a
+      choice between overwriting a known occupancy with nothing, or carrying a
+      stale reading forward silently. Both are wrong.
+    * **Different provenance.** Section 6.5 fuses occupancy across sources of
+      differing trust -- APC, operator feed, conductor app, crowdsourced -- while
+      a position has one source. Occupancy arriving from an entirely separate
+      channel must not require rewriting position state.
+
+    Absence is not emptiness. A vehicle with no entry here, or one whose entry
+    has aged out, reads back as `UNKNOWN` with a null ratio -- never `EMPTY`
+    (section 12.4 rule 3).
+    """
+
+    def __init__(self, redis, city_id: str, max_age_s: int = DEFAULT_MAX_AGE_S) -> None:
+        self.redis = redis
+        self.city_id = city_id
+        self.max_age_s = max_age_s
+
+    @property
+    def _hash_key(self) -> str:
+        return f"pravaah:{self.city_id}:occupancy"
+
+    # -- writes ------------------------------------------------------------
+
+    def put_many(self, observations: list[OccupancyObservation]) -> int:
+        """Upsert a batch in one round trip."""
+        if not observations:
+            return 0
+
+        pipe = self.redis.pipeline(transaction=False)
+        for obs in observations:
+            pipe.hset(self._hash_key, obs.vehicle_id, obs.model_dump_json())
+        pipe.execute()
+        return len(observations)
+
+    def clear(self) -> None:
+        self.redis.delete(self._hash_key)
+
+    # -- reads -------------------------------------------------------------
+
+    def get(self, vehicle_id: str, now: datetime | None = None) -> OccupancyObservation | None:
+        raw = self.redis.hget(self._hash_key, vehicle_id)
+        if raw is None:
+            return None
+        obs = OccupancyObservation.model_validate_json(raw)
+        if self._is_expired(obs, now):
+            self._prune([vehicle_id])
+            return None
+        return obs
+
+    def get_many(
+        self, vehicle_ids: list[str], now: datetime | None = None
+    ) -> dict[str, OccupancyObservation]:
+        """Occupancy for a set of vehicles, in one round trip.
+
+        Vehicles with no reading are simply absent from the result. The caller
+        renders those as UNKNOWN; this method never invents an entry.
+        """
+        if not vehicle_ids:
+            return {}
+
+        raw = self.redis.hmget(self._hash_key, vehicle_ids)
+        found: dict[str, OccupancyObservation] = {}
+        expired: list[str] = []
+        for vehicle_id, value in zip(vehicle_ids, raw, strict=True):
+            if value is None:
+                continue
+            obs = OccupancyObservation.model_validate_json(value)
+            if self._is_expired(obs, now):
+                expired.append(vehicle_id)
+            else:
+                found[vehicle_id] = obs
+
+        if expired:
+            self._prune(expired)
+        return found
+
+    def count(self) -> int:
+        return int(self.redis.hlen(self._hash_key))
+
+    # -- internals ---------------------------------------------------------
+
+    def _is_expired(self, obs: OccupancyObservation, now: datetime | None) -> bool:
+        now = now or datetime.now(UTC)
+        return (now - obs.ts).total_seconds() > self.max_age_s
+
+    def _prune(self, vehicle_ids: list[str]) -> None:
+        if not vehicle_ids:
+            return
+        self.redis.hdel(self._hash_key, *vehicle_ids)
 
 
 def _span_m(lat1: float, lon1: float, lat2: float, lon2: float) -> float:

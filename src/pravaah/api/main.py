@@ -19,7 +19,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from ..contracts.api import ErrorCode
-from . import passenger
+from . import admin, auth, conductor, passenger
 from .deps import build_resources, now
 from .schemas import HealthResponse
 
@@ -51,6 +51,9 @@ app.add_middleware(
 )
 
 app.include_router(passenger.router)
+app.include_router(admin.router)
+app.include_router(auth.router)
+app.include_router(conductor.router)
 
 
 @app.exception_handler(HTTPException)

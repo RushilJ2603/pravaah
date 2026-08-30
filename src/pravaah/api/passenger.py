@@ -10,16 +10,27 @@ or zero -- the API tells the truth about what it does not yet know.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, HTTPException, Query, Request
 
 from ..contracts.api import ErrorCode
-from ..contracts.events import OccupancyClass
+from ..contracts.events import (
+    OccupancyClass,
+    OccupancyObservation,
+    VehiclePositionEvent,
+)
 from .deps import AppResources, now
 from .schemas import (
+    CrowdBand,
     DeparturesResponse,
     DepartureView,
     FleetResponse,
+    JourneyLeg,
+    JourneyOption,
+    PlanResponse,
+    StopForecast,
+    TripForecastResponse,
     VehicleResponse,
     VehicleView,
 )
@@ -38,6 +49,32 @@ DEFAULT_DEPARTURE_WINDOW_MIN = 60
 
 def _resources(request: Request) -> AppResources:
     return request.app.state.resources
+
+
+def _view(
+    event: VehiclePositionEvent,
+    current: datetime,
+    stale_after_s: int,
+    crowd: OccupancyObservation | None,
+) -> VehicleView:
+    """Join a position with its latest crowd reading, if there is one.
+
+    `crowd is None` covers three different situations -- the vehicle never
+    reported occupancy, the feed does not publish it at all, or the last reading
+    aged out. All three are `UNKNOWN`, and none of them is `EMPTY`
+    (section 12.4 rule 3). Collapsing them into a zero is the single most
+    damaging bug this system could ship, so the absence is handled here once
+    rather than at each call site.
+    """
+    if crowd is None:
+        return VehicleView.from_event(event, current, stale_after_s)
+    return VehicleView.from_event(
+        event,
+        current,
+        stale_after_s,
+        occupancy_class=crowd.occupancy_class,
+        occupancy_ratio=crowd.occupancy_ratio,
+    )
 
 
 def _fail(code: ErrorCode, message: str, status: int = 400) -> HTTPException:
@@ -90,11 +127,14 @@ def list_vehicles(
     )
     stale_after = resources.city.validation.stale_after_s
 
+    shown = events[:limit]
+    crowd = resources.occupancy.get_many([e.vehicle_id for e in shown], now=current)
+
     return FleetResponse(
         generated_at=current,
         city_id=resources.city.city_id,
-        count=len(events),
-        vehicles=[VehicleView.from_event(e, current, stale_after) for e in events[:limit]],
+        count=len(shown),
+        vehicles=[_view(e, current, stale_after, crowd.get(e.vehicle_id)) for e in shown],
     )
 
 
@@ -115,8 +155,11 @@ def get_vehicle(request: Request, vehicle_id: str) -> VehicleResponse:
     return VehicleResponse(
         generated_at=current,
         city_id=resources.city.city_id,
-        vehicle=VehicleView.from_event(
-            event, current, resources.city.validation.stale_after_s
+        vehicle=_view(
+            event,
+            current,
+            resources.city.validation.stale_after_s,
+            resources.occupancy.get(vehicle_id, now=current),
         ),
     )
 
@@ -220,3 +263,337 @@ def _at_service_seconds(local_now, seconds: int):
 
     midnight = local_now.replace(hour=0, minute=0, second=0, microsecond=0)
     return midnight + timedelta(seconds=seconds)
+
+
+# ---------------------------------------------------------------------------
+# Forecast and journey planning
+# ---------------------------------------------------------------------------
+
+
+def _band(quantiles, is_fallback: bool | None = None) -> CrowdBand:
+    """Wire shape for a crowd distribution. Never collapses to one number."""
+    return CrowdBand(
+        p10_class=quantiles.p10_class,
+        p50_class=quantiles.p50_class,
+        p90_class=quantiles.p90_class,
+        p10_onboard=quantiles.p10_onboard,
+        p50_onboard=quantiles.p50_onboard,
+        p90_onboard=quantiles.p90_onboard,
+        p50_ratio=quantiles.p50_ratio if quantiles.p50_class.is_known else None,
+        capacity=quantiles.capacity,
+        model_version=quantiles.model_version,
+        is_fallback=(
+            getattr(quantiles, "is_fallback", False)
+            if is_fallback is None
+            else is_fallback
+        ),
+    )
+
+
+def _service_midnight(current: datetime, tz) -> datetime:
+    local = current.astimezone(tz)
+    return local.replace(hour=0, minute=0, second=0, microsecond=0)
+
+
+@router.get("/trips/{trip_id}/forecast", response_model=TripForecastResponse)
+def trip_forecast(request: Request, trip_id: str) -> TripForecastResponse:
+    """Predicted crowd at each upcoming stop of a trip (section 12.1).
+
+    This is the product's core claim: not how full the bus is now, but how full
+    it will be when it reaches the stop the passenger is waiting at.
+    """
+    resources = _resources(request)
+    if resources.db_pool is None:
+        raise _fail(ErrorCode.FEED_UNAVAILABLE, "schedule database unavailable", status=503)
+    if resources.forecaster is None:
+        raise _fail(ErrorCode.FEED_UNAVAILABLE, "forecast model unavailable", status=503)
+
+    current = now()
+    tz = _zoneinfo(resources.city.timezone)
+    midnight = _service_midnight(current, tz)
+
+    with resources.db_pool.connection() as conn, conn.cursor() as cur:
+        feed_version_id = _latest_feed_version(cur, resources.city.city_id)
+        cur.execute(
+            """
+            SELECT st.stop_sequence, st.stop_id, s.name, st.arrival_seconds, t.route_id
+              FROM stop_time st
+              JOIN stop s ON s.feed_version_id = st.feed_version_id AND s.stop_id = st.stop_id
+              JOIN trip t ON t.feed_version_id = st.feed_version_id AND t.trip_id = st.trip_id
+             WHERE st.feed_version_id = %s AND st.trip_id = %s
+             ORDER BY st.stop_sequence
+            """,
+            (feed_version_id, trip_id),
+        )
+        rows = cur.fetchall()
+
+    if not rows:
+        raise _fail(ErrorCode.NO_ROUTE_FOUND, f"unknown trip {trip_id}", status=404)
+
+    total = len(rows)
+    route_id = rows[0][4]
+    stops: list[StopForecast] = []
+    for index, (sequence, stop_id, name, arrival_s, _route) in enumerate(rows):
+        position = index / max(total - 1, 1)
+        arrival = midnight + timedelta(seconds=int(arrival_s))
+        quantiles = resources.forecaster.predict(
+            arrival.astimezone(tz).hour, position, route_id
+        )
+        stops.append(
+            StopForecast(
+                stop_id=stop_id,
+                stop_name=name,
+                stop_sequence=sequence,
+                scheduled_arrival=arrival,
+                crowd=_band(quantiles),
+            )
+        )
+
+    return TripForecastResponse(
+        generated_at=current,
+        city_id=resources.city.city_id,
+        trip_id=trip_id,
+        route_id=route_id,
+        model_version=resources.forecaster.model_version,
+        stops=stops,
+    )
+
+
+#: Preference profiles (section 10.2). Weights are per-minute-equivalents: how
+#: many minutes of travel a passenger will trade to avoid one unit of crowding
+#: or one transfer.
+PROFILES: dict[str, dict[str, float]] = {
+    "fastest": {"crowd": 0.5, "transfer": 4.0, "wait": 1.0},
+    "least_crowded": {"crowd": 14.0, "transfer": 6.0, "wait": 1.0},
+    "most_reliable": {"crowd": 2.0, "transfer": 25.0, "wait": 1.0},
+    "balanced": {"crowd": 6.0, "transfer": 8.0, "wait": 1.0},
+}
+
+#: How far a passenger will walk to a stop, metres.
+WALK_RADIUS_M = 700
+
+
+@router.get("/plan", response_model=PlanResponse)
+def plan(
+    request: Request,
+    from_lat: float = Query(..., ge=-90, le=90),
+    from_lon: float = Query(..., ge=-180, le=180),
+    to_lat: float = Query(..., ge=-90, le=90),
+    to_lon: float = Query(..., ge=-180, le=180),
+    profile: str = Query("balanced"),
+    window_min: int = Query(60, ge=5, le=240),
+) -> PlanResponse:
+    """Ranked journeys using *predicted* crowd, with a reason for each.
+
+    Routing itself is deterministic -- candidates come from the timetable, not
+    from a model (section 5). The model only predicts the conditions each
+    candidate will face, and the ranking is an explicit weighted cost so every
+    option can say why it scored as it did.
+    """
+    resources = _resources(request)
+    if resources.db_pool is None:
+        raise _fail(ErrorCode.FEED_UNAVAILABLE, "schedule database unavailable", status=503)
+    if profile not in PROFILES:
+        raise _fail(
+            ErrorCode.INVALID_COORDINATES,
+            f"unknown profile '{profile}'; choose one of {sorted(PROFILES)}",
+        )
+
+    current = now()
+    tz = _zoneinfo(resources.city.timezone)
+    midnight = _service_midnight(current, tz)
+    local = current.astimezone(tz)
+    from_seconds = local.hour * 3600 + local.minute * 60
+    to_seconds = from_seconds + window_min * 60
+
+    with resources.db_pool.connection() as conn, conn.cursor() as cur:
+        feed_version_id = _latest_feed_version(cur, resources.city.city_id)
+        origins = _stops_near(cur, feed_version_id, from_lat, from_lon)
+        destinations = _stops_near(cur, feed_version_id, to_lat, to_lon)
+        if not origins or not destinations:
+            raise _fail(
+                ErrorCode.OUT_OF_SERVICE_AREA,
+                "no stops within walking distance of both points",
+                status=404,
+            )
+
+        cur.execute(
+            """
+            SELECT st1.trip_id, t.route_id, r.long_name,
+                   st1.stop_id, so.name, st1.stop_sequence, st1.departure_seconds,
+                   st2.stop_id, sd.name, st2.stop_sequence, st2.arrival_seconds,
+                   (SELECT count(*) FROM stop_time stc
+                     WHERE stc.feed_version_id = st1.feed_version_id
+                       AND stc.trip_id = st1.trip_id) AS trip_stops
+              FROM stop_time st1
+              JOIN stop_time st2
+                ON st2.feed_version_id = st1.feed_version_id
+               AND st2.trip_id = st1.trip_id
+               AND st2.stop_sequence > st1.stop_sequence
+              JOIN trip t ON t.feed_version_id = st1.feed_version_id AND t.trip_id = st1.trip_id
+              JOIN route r ON r.feed_version_id = st1.feed_version_id AND r.route_id = t.route_id
+              JOIN stop so ON so.feed_version_id = st1.feed_version_id AND so.stop_id = st1.stop_id
+              JOIN stop sd ON sd.feed_version_id = st1.feed_version_id AND sd.stop_id = st2.stop_id
+             WHERE st1.feed_version_id = %s
+               AND st1.stop_id = ANY(%s) AND st2.stop_id = ANY(%s)
+               AND st1.departure_seconds BETWEEN %s AND %s
+             ORDER BY st1.departure_seconds
+             LIMIT 40
+            """,
+            (
+                feed_version_id,
+                [s[0] for s in origins],
+                [s[0] for s in destinations],
+                from_seconds,
+                to_seconds,
+            ),
+        )
+        rows = cur.fetchall()
+
+    if not rows:
+        raise _fail(
+            ErrorCode.NO_ROUTE_FOUND, "no direct service found in the requested window", status=404
+        )
+
+    weights = PROFILES[profile]
+    options: list[JourneyOption] = []
+    seen_routes: set[str] = set()
+
+    for row in rows:
+        (
+            trip_id, route_id, route_name,
+            board_id, board_name, board_seq, depart_s,
+            alight_id, alight_name, alight_seq, arrive_s,
+            trip_stops,
+        ) = row
+
+        # One option per route: ten departures of the same bus is not choice.
+        if route_id in seen_routes:
+            continue
+        seen_routes.add(route_id)
+
+        departure = midnight + timedelta(seconds=int(depart_s))
+        arrival = midnight + timedelta(seconds=int(arrive_s))
+        ride_min = max(1, int((arrive_s - depart_s) / 60))
+        wait_min = max(0, int((depart_s - from_seconds) / 60))
+
+        position = (board_seq - 1) / max(trip_stops - 1, 1)
+        quantiles = (
+            resources.forecaster.predict(
+                departure.astimezone(tz).hour, position, route_id
+            )
+            if resources.forecaster
+            else None
+        )
+        crowd_ordinal = (
+            quantiles.p50_class.ordinal
+            if quantiles and quantiles.p50_class.ordinal is not None
+            else 0
+        )
+
+        score = (
+            ride_min
+            + wait_min * weights["wait"]
+            + crowd_ordinal * weights["crowd"]
+        )
+
+        reasons: list[str] = []
+        if quantiles and quantiles.p50_class.is_known:
+            reasons.append(f"predicted {_readable(quantiles.p50_class)} when you board")
+            if quantiles.p90_class is not quantiles.p50_class:
+                reasons.append(f"could be as busy as {_readable(quantiles.p90_class)}")
+        else:
+            reasons.append("no crowd forecast available for this departure")
+        reasons.append(f"{ride_min} min on board, no transfers")
+        if wait_min <= 3:
+            reasons.append("leaves within 3 minutes")
+        elif wait_min >= 20:
+            reasons.append(f"{wait_min} min wait before departure")
+
+        options.append(
+            JourneyOption(
+                option_id=f"{trip_id}:{board_seq}-{alight_seq}",
+                total_minutes=ride_min + wait_min,
+                transfers=0,
+                departure=departure,
+                arrival=arrival,
+                legs=[
+                    JourneyLeg(
+                        route_id=route_id,
+                        route_name=route_name,
+                        board_stop_id=board_id,
+                        board_stop_name=board_name,
+                        alight_stop_id=alight_id,
+                        alight_stop_name=alight_name,
+                        departure=departure,
+                        arrival=arrival,
+                        stops=int(alight_seq - board_seq),
+                        crowd=_band(quantiles) if quantiles else _band(_unknown_band()),
+                    )
+                ],
+                score=round(score, 2),
+                reasons=reasons,
+            )
+        )
+
+    options.sort(key=lambda o: o.score)
+    ranked = [
+        o.model_copy(update={"is_recommended": index == 0})
+        for index, o in enumerate(options[:5])
+    ]
+
+    return PlanResponse(
+        generated_at=current,
+        city_id=resources.city.city_id,
+        profile=profile,
+        options=ranked,
+    )
+
+
+def _unknown_band():
+    from ..models.crowd import CrowdQuantiles
+
+    return CrowdQuantiles.unknown()
+
+
+def _readable(occupancy: OccupancyClass) -> str:
+    return {
+        OccupancyClass.EMPTY: "empty",
+        OccupancyClass.MANY_SEATS_AVAILABLE: "plenty of seats",
+        OccupancyClass.FEW_SEATS_AVAILABLE: "a few seats left",
+        OccupancyClass.STANDING_ROOM_ONLY: "standing room only",
+        OccupancyClass.CRUSHED_STANDING_ROOM_ONLY: "very crowded",
+        OccupancyClass.FULL: "full",
+        OccupancyClass.NOT_ACCEPTING_PASSENGERS: "not accepting passengers",
+    }.get(occupancy, "unknown crowding")
+
+
+def _stops_near(cur, feed_version_id: int, lat: float, lon: float) -> list[tuple]:
+    """Stops within walking distance, nearest first."""
+    cur.execute(
+        """
+        SELECT stop_id, name,
+               ST_Distance(geom, ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography) AS m
+          FROM stop
+         WHERE feed_version_id = %s
+           AND ST_DWithin(geom, ST_SetSRID(ST_MakePoint(%s, %s), 4326)::geography, %s)
+         ORDER BY m
+         LIMIT 8
+        """,
+        (lon, lat, feed_version_id, lon, lat, WALK_RADIUS_M),
+    )
+    return cur.fetchall()
+
+
+def _latest_feed_version(cur, city_id: str) -> int:
+    cur.execute(
+        """
+        SELECT feed_version_id FROM feed_version
+         WHERE city_id = %s ORDER BY imported_at DESC LIMIT 1
+        """,
+        (city_id,),
+    )
+    row = cur.fetchone()
+    if row is None:
+        raise _fail(ErrorCode.FEED_UNAVAILABLE, "no GTFS feed imported", status=503)
+    return row[0]

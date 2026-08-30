@@ -24,8 +24,8 @@ from datetime import UTC, datetime
 from ..adapters.base import RealtimeAdapter
 from ..adapters.mbta import build as build_mbta
 from ..config import CityProfile, active_city, load_settings
-from ..contracts.events import VehiclePositionEvent
-from ..state.redis_state import LatestVehicleState
+from ..contracts.events import OccupancyObservation, VehiclePositionEvent
+from ..state.redis_state import LatestOccupancyState, LatestVehicleState
 from .validate import PositionValidator
 
 log = logging.getLogger(__name__)
@@ -40,15 +40,18 @@ class IngestWorker:
         city: CityProfile,
         state: LatestVehicleState | None = None,
         db_pool=None,
+        occupancy: LatestOccupancyState | None = None,
     ) -> None:
         self.adapter = adapter
         self.city = city
         self.state = state
+        self.occupancy = occupancy
         self.db_pool = db_pool
         self.validator = PositionValidator(city)
         self.cycles = 0
         self.accepted_total = 0
         self.rejected_total = 0
+        self.occupancy_total = 0
         self._running = True
 
     def stop(self) -> None:
@@ -64,6 +67,13 @@ class IngestWorker:
         self.accepted_total += len(result.accepted)
         self.rejected_total += len(result.rejected)
 
+        # Occupancy rides on the same payload, but only for vehicles whose
+        # position survived validation. A position rejected as impossible must
+        # not contribute a crowd reading to live state through the side door.
+        accepted_ids = {e.vehicle_id for e in result.accepted}
+        occupancies = [o for o in snapshot.occupancies if o.vehicle_id in accepted_ids]
+        self.occupancy_total += len(occupancies)
+
         if result.accepted:
             if self.state is not None:
                 try:
@@ -76,13 +86,26 @@ class IngestWorker:
                 except Exception:  # noqa: BLE001
                     log.exception("failed to persist history")
 
+        if occupancies:
+            if self.occupancy is not None:
+                try:
+                    self.occupancy.put_many(occupancies)
+                except Exception:  # noqa: BLE001
+                    log.exception("failed to write latest occupancy")
+            if self.db_pool is not None:
+                try:
+                    self._persist_occupancy(occupancies)
+                except Exception:  # noqa: BLE001
+                    log.exception("failed to persist occupancy history")
+
         log.info(
-            "cycle %d: %d accepted, %d rejected %s, %d stale, occupancy %.0f%%",
+            "cycle %d: %d accepted, %d rejected %s, %d stale, %d occupancy (%.0f%% coverage)",
             self.cycles,
             len(result.accepted),
             len(result.rejected),
             result.reasons() or "",
             len(result.stale),
+            len(occupancies),
             snapshot.occupancy_coverage * 100,
         )
         return len(result.accepted)
@@ -140,6 +163,39 @@ class IngestWorker:
             )
             conn.commit()
 
+    def _persist_occupancy(self, observations: list[OccupancyObservation]) -> None:
+        """Append crowd observations to the immutable history (section 11.1).
+
+        These are the training labels. Redis holds only the latest reading per
+        vehicle; this table is the only place the history survives, and it
+        cannot be re-recorded for elapsed time.
+        """
+        rows = [
+            (
+                o.city_id, o.vehicle_id, o.trip_id, o.ts,
+                o.onboard, o.capacity, o.occupancy_ratio,
+                o.occupancy_class.value, o.boardings, o.alightings, o.confidence,
+                o.provenance.source_type.value, o.provenance.source_name,
+                o.provenance.ingest_timestamp,
+            )
+            for o in observations
+        ]
+        with self.db_pool.connection() as conn, conn.cursor() as cur:
+            cur.executemany(
+                """
+                INSERT INTO occupancy_observation (
+                    city_id, vehicle_id, trip_id, ts,
+                    onboard, capacity, occupancy_ratio,
+                    occupancy_class, boardings, alightings, confidence,
+                    source_type, source_name, ingest_ts
+                ) VALUES (
+                    %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s
+                )
+                """,
+                rows,
+            )
+            conn.commit()
+
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Poll a realtime feed into live state.")
@@ -157,6 +213,7 @@ def main(argv: list[str] | None = None) -> int:
     client = redis_lib.Redis.from_url(settings.redis_url, socket_connect_timeout=5)
     client.ping()
     state = LatestVehicleState(client, city.city_id)
+    occupancy = LatestOccupancyState(client, city.city_id)
 
     pool = None
     if not args.no_persist:
@@ -165,7 +222,9 @@ def main(argv: list[str] | None = None) -> int:
         pool = ConnectionPool(settings.database_dsn, min_size=1, max_size=2, open=True)
         pool.wait(timeout=10)
 
-    worker = IngestWorker(build_mbta(city), city, state=state, db_pool=pool)
+    worker = IngestWorker(
+        build_mbta(city), city, state=state, db_pool=pool, occupancy=occupancy
+    )
 
     def handle_signal(signum, frame):  # noqa: ARG001
         log.info("stopping after the current cycle")
@@ -178,10 +237,11 @@ def main(argv: list[str] | None = None) -> int:
         worker.run(interval_s=args.interval, max_cycles=args.max_cycles)
     finally:
         log.info(
-            "stopped after %d cycles: %d accepted, %d rejected",
+            "stopped after %d cycles: %d accepted, %d rejected, %d occupancy",
             worker.cycles,
             worker.accepted_total,
             worker.rejected_total,
+            worker.occupancy_total,
         )
         client.close()
         if pool is not None:

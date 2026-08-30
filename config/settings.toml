@@ -2,7 +2,7 @@
 # SOLUTION.md section 30.2 -- preference weights are CONFIGURATION.
 # Changing a weight must never require a code change.
 
-active_city = "mbta"
+active_city = "delhi"
 
 # Generalized cost weights (SOLUTION.md section 10.2):
 #   wT travel, wW wait, wX transfer, wC crowd, wD delay risk,
@@ -53,7 +53,7 @@ material_threshold = 0.15
 cooldown_s = 180
 
 [database]
-dsn = "postgresql://pravaah:pravaah@localhost:5432/pravaah"
+dsn = "postgresql://pravaah:pravaah@localhost:15432/pravaah"
 
 [redis]
 url = "redis://localhost:6379/0"
