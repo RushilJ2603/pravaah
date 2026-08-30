@@ -44,6 +44,9 @@ dependencies:
   google_fonts: ^8.2.1
   geolocator: ^14.0.3
   google_nav_bar: ^5.0.7
+  pravaah_api:
+    path: ../pravaah_api
+  intl: ^0.20.0
 
 dev_dependencies:
   flutter_test:

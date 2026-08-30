@@ -5,7 +5,7 @@ import 'package:latlong2/latlong.dart';
 import 'package:geolocator/geolocator.dart';
 import '../../providers/vehicle_provider.dart';
 import '../../../../theme/app_theme.dart';
-import '../../data/models.dart';
+import 'package:pravaah_api/api.dart';
 
 class MiniLiveMap extends ConsumerStatefulWidget {
   const MiniLiveMap({super.key});
@@ -28,44 +28,13 @@ class _MiniLiveMapState extends ConsumerState<MiniLiveMap> {
   }
 
   Future<void> _determinePosition() async {
-    setState(() {
-      _isLoadingLocation = true;
-    });
-
-    try {
-      bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
-      if (!serviceEnabled) {
-        throw Exception('Location services are disabled.');
-      }
-
-      LocationPermission permission = await Geolocator.checkPermission();
-      if (permission == LocationPermission.denied) {
-        permission = await Geolocator.requestPermission();
-        if (permission == LocationPermission.denied) {
-          throw Exception('Location permissions are denied');
-        }
-      }
-
-      if (permission == LocationPermission.deniedForever) {
-        throw Exception('Location permissions are permanently denied.');
-      }
-
-      Position position = await Geolocator.getCurrentPosition();
-      setState(() {
-        _currentPosition = position;
-      });
-      
-      // Move map to the user's live location
-      _mapController.move(LatLng(position.latitude, position.longitude), 14.0);
-      
-    } catch (e) {
-      debugPrint("Location error: $e");
-    } finally {
-      if (mounted) {
-        setState(() {
-          _isLoadingLocation = false;
-        });
-      }
+    // Overriding real GPS for the simulation to keep the viewport in Delhi.
+    _mapController.move(const LatLng(28.6139, 77.2090), 13.0);
+    
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Showing Delhi simulation area.')),
+      );
     }
   }
 
@@ -168,14 +137,14 @@ class _MiniLiveMapState extends ConsumerState<MiniLiveMap> {
     );
   }
 
-  Marker _buildMarker(Vehicle v) {
+  Marker _buildMarker(VehicleView v) {
     Color markerColor = Colors.grey; 
-    if (v.occupancyClass != "UNKNOWN") {
+    if (v.occupancyClass != OccupancyClass.UNKNOWN) {
        markerColor = AppTheme.primaryBlue;
     }
 
     return Marker(
-      point: LatLng(v.lat, v.lon),
+      point: LatLng(v.lat.toDouble(), v.lon.toDouble()),
       width: 40,
       height: 40,
       child: Stack(
@@ -188,7 +157,7 @@ class _MiniLiveMapState extends ConsumerState<MiniLiveMap> {
               border: Border.all(
                 color: Colors.white,
                 width: 2,
-                style: v.sourceType == "SIMULATED" ? BorderStyle.none : BorderStyle.solid,
+                style: v.sourceType == SourceType.SIMULATED ? BorderStyle.none : BorderStyle.solid,
               ),
               boxShadow: const [
                 BoxShadow(color: Colors.black26, blurRadius: 4, offset: Offset(0,2)),
