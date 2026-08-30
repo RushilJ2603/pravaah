@@ -1,0 +1,10 @@
+flutter_launcher_icons:
+  android: "launcher_icon"
+  ios: true
+  image_path: "assets/images/logo_padded.png"
+  min_sdk_android: 21
+  web:
+    generate: true
+    image_path: "assets/images/logo_padded.png"
+    background_color: "#FFFFFF"
+    theme_color: "#0066EC"
