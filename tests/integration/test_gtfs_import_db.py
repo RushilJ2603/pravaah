@@ -93,7 +93,9 @@ def test_import_is_idempotent_by_feed_hash(conn, clean_feed_versions):
     assert not first.already_imported
     assert first.feed_version_id is not None
     assert first.routes == 399
-    assert first.stops == 10_297
+    # 9,630 routable stops, not the 10,297 raw rows: 667 coordinate-less
+    # location_type=3 pathway nodes are excluded by design (SOLUTION.md 6.2.1).
+    assert first.stops == 9_630
     assert first.trips == 89_080
     assert first.stop_times == 2_221_062
 

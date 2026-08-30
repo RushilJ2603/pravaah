@@ -16,6 +16,47 @@
 #
 # ──────────────────────────────────────────────────────────────
 
+## [2026-08-30 08:20 IST] — P0.2 and P0.3 gates verified against a live database | By: AI
+
+### Done This Session
+- Brought up the compose stack. **P0.2 gate passes**: migrations 001–004 applied cleanly from an
+  empty volume — `postgis` + `timescaledb` extensions, all 12 tables, all 4 hypertables.
+- **P0.3 gate passes**: imported the real MBTA feed — 399 routes, 9,630 routable stops, 89,080
+  trips, **2,221,062 stop-times** in ~100 s; re-import returned the same `feed_version_id` and
+  wrote nothing; overnight times past 86400 s survived the round trip.
+- **First exercise of the doc-first rule.** The initial run failed: the §31 gate expected 10,297
+  stops, the importer inserted 9,630. Investigation showed the 667 difference is entirely
+  `location_type=3` generic pathway nodes (platform/lobby nodes inside stations) which have no
+  coordinates and which **no trip references** in `stop_times.txt`. Since §27 declares
+  `stop.geom NOT NULL`, the gate figure and the schema could not both hold.
+  **Amended `docs/SOLUTION.md` first (§6.2.1, §28.1, §31, Appendix C) with the owner's approval,
+  then changed the code.** Schema unchanged; the importer still refuses to invent coordinates.
+- Added a unit test asserting the *justification*, not just the number: all 667 are location_type 3
+  and disjoint from the set of stops any trip serves. If a future feed drops coordinates on a
+  genuinely served stop, that test fails loudly instead of silently losing the stop.
+- **41 tests pass (38 unit + 3 integration), ruff clean.**
+
+### Errors Hit
+- **Port 5432 was already owned by an unrelated container** (`postgres-db`, `postgres:16`).
+  Docker **silently declines to publish a taken port** — `docker compose up -d` reported success,
+  the container was healthy, and `docker compose exec psql` worked (unix socket), while every
+  host client silently reached the *other* postgres and failed authentication. Diagnosed by
+  correlating a failed connection against our container's logs: it logged nothing, proving the
+  traffic never arrived. Resolved by publishing on **15432**.
+  Two false leads recorded so I do not repeat them: `NetworkSettings.Ports` showed `[]` which
+  looked like a Docker bug, and `psql -h 127.0.0.1` *inside* the container succeeded — but that
+  matches a `trust` line in `pg_hba.conf`, so it proved nothing about the password.
+- An earlier run reported "3 skipped" with **exit code 0** — the fixture skipped on connection
+  failure. A skipped gate is not a passing gate; verified by reading the output, not the exit code.
+
+### Next Session Must
+- Build **P0.4**, `src/pravaah/ingest/convert.py` per §28.2 — streaming CSV → date-partitioned
+  Parquet with TripUpdates deduplication. Install `pandas` and `pyarrow` first.
+- Decide with the owner whether SOLUTION.md §30.2's documented DSN should move to port 15432, or
+  whether compose reverts to 5432 once the conflicting container is gone.
+
+---
+
 ## [2026-08-30 07:45 IST] — Repo initialized, solution document made binding, P0 started | By: AI
 
 ### Done This Session

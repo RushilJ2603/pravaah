@@ -11,8 +11,12 @@ services:
       POSTGRES_USER: pravaah
       POSTGRES_PASSWORD: pravaah
       POSTGRES_DB: pravaah
+    # Host 15432, not 5432: an unrelated postgres:16 container already owns
+    # 5432 on this machine. Docker silently declines to publish a taken port,
+    # which looks identical to a working stack until a client connects and
+    # reaches the other server. Override the DSN with PRAVAAH_DATABASE_DSN.
     ports:
-      - "5432:5432"
+      - "15432:5432"
     volumes:
       - pgdata:/home/postgres/pgdata/data
       - ./migrations:/docker-entrypoint-initdb.d:ro

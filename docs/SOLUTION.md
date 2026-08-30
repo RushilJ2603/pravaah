@@ -324,7 +324,10 @@ dataset contains all required domains.
 
 #### 6.2.1 MBTA (development substrate — active)
 
-- **Static GTFS:** `https://cdn.mbta.com/MBTA_GTFS.zip`. The snapshot in use is `data/mbta_gtfs.zip`, feed version *"Summer 2026, 2026-08-19, version D"*, valid 2026-08-12 → 2026-09-05. Verified contents: **399 routes, 10,297 stops, 89,080 trips, 2,221,062 stop-times.**
+- **Static GTFS:** `https://cdn.mbta.com/MBTA_GTFS.zip`. The snapshot in use is `data/mbta_gtfs.zip`, feed version *"Summer 2026, 2026-08-19, version D"*, valid 2026-08-12 → 2026-09-05. Verified contents: **399 routes, 10,297 stop rows, 89,080 trips, 2,221,062 stop-times.**
+- **Of those 10,297 stop rows, only 9,630 are routable and importable.** The remaining **667 are `location_type=3` generic nodes** — pathway nodes inside stations (platform and lobby nodes). GTFS makes `stop_lat`/`stop_lon` optional for them, and all 667 lack coordinates. **None is referenced by `stop_times.txt`**: no trip ever serves one. They are therefore excluded at import rather than given invented coordinates, and `stop.geom` stays `NOT NULL` (§27).
+  Full composition by `location_type`: 7,768 stops/platforms (0), 276 stations (1), 332 entrances (2), 1,921 generic nodes (3), of which the 667 without coordinates are skipped.
+  *If in-station pathway routing is ever built, these nodes need their own table with nullable geometry; they must not be forced into `stop`.*
 - **VehiclePositions:** `https://cdn.mbta.com/realtime/VehiclePositions.pb` — no API key.
 - **TripUpdates:** `https://cdn.mbta.com/realtime/TripUpdates.pb` — no API key.
 - **Occupancy:** carried inline on VehiclePositions as `occupancy_status` and `occupancy_percentage`.
@@ -1424,6 +1427,8 @@ def import_gtfs(zip_path: Path, city_id: str, conn) -> int:
     """Import a GTFS ZIP. Returns feed_version_id. Idempotent by sha256 of the ZIP."""
 ```
 
+Stops without coordinates are **skipped, not defaulted**. A stop with an invented or zero geometry is worse than an absent one: it silently corrupts every nearest-stop query. See §6.2.1 for the 667 MBTA pathway nodes this affects.
+
 Validates before publishing: referential integrity (every `stop_time.stop_id` exists in
 `stops`, every `trip.route_id` in `routes`), coordinate bounds against the city profile's
 bounding box, monotonic `stop_sequence` per trip, non-empty service calendar. On any failure,
@@ -1648,7 +1653,7 @@ Each phase is complete only when its gate passes. Gates are executable tests, no
 |---|---|---|
 | **P0.1** | `contracts/`, `config.py`, city profiles | `pytest tests/unit/test_contracts.py` — a model missing `provenance` raises `ValidationError`. |
 | **P0.2** | `migrations/001–004`, docker-compose (Postgres+PostGIS+Timescale+Redis) | `docker compose up -d && psql -f migrations/*.sql` applies cleanly from empty. |
-| **P0.3** | `ingest/gtfs_import.py` | Importing `data/mbta_gtfs.zip` yields exactly 399 routes, 10,297 stops, 89,080 trips, 2,221,062 stop-times. Re-import returns the **same** `feed_version_id`. |
+| **P0.3** | `ingest/gtfs_import.py` | Importing `data/mbta_gtfs.zip` yields exactly 399 routes, **9,630 stops with geometry**, 89,080 trips, 2,221,062 stop-times. (667 coordinate-less `location_type=3` pathway nodes are excluded by design — §6.2.1.) Re-import returns the **same** `feed_version_id`. |
 | **P0.4** | `ingest/convert.py` | Full CSV corpus converts to Parquet; TripUpdates row count drops materially after dedup; peak RSS stays under 1 GB. |
 | **P1.1** | `adapters/base.py`, `gtfs_rt.py`, `mbta.py` | Live poll produces valid `VehiclePositionEvent`s; zero records lack provenance. |
 | **P1.2** | `ingest/validate.py`, `mapmatch.py`, `stop_passage.py` | Map-match success >95% on a clean replay sample (§21); impossible-speed positions rejected. |
@@ -1763,6 +1768,7 @@ navigation apps have no incentive to build.
 | 2026-08-30 | §9.6, §22: label-imbalance handling made explicit | 0.5% `FULL` makes global accuracy misleading | Owner |
 | 2026-08-30 | ADR-10 and §28.2 added: CSV capture → Parquet conversion | 864 MB of near-duplicate TripUpdates rows | Owner |
 | 2026-08-30 | **Part II added** (§25–§32): repo layout, contracts, DDL, module specs, API schemas, config, build gates | Makes "built exactly to the document" a checkable claim | Owner |
+| 2026-08-30 | §6.2.1, §28.1, §31: stop gate corrected from 10,297 to **9,630 stops with geometry**; 667 coordinate-less `location_type=3` pathway nodes excluded by design | The §31 gate figure (raw row count) contradicted the §27 `geom NOT NULL` schema. Surfaced by the P0.3 integration gate failing. Schema unchanged; the importer refuses to invent coordinates | Owner |
 
 > **To propose a change:** add a row here with the date, the change, the rationale and a blank
 > Approved column; edit the relevant section; and raise it with the project owner. Do not write

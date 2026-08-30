@@ -30,12 +30,21 @@ MBTA_ZIP = PROJECT_ROOT / "data" / "mbta_gtfs.zip"
 #: The numbers quoted in SOLUTION.md sections 6.2.1 and 31. If the feed is ever
 #: replaced these must be re-derived and the document updated -- that is the
 #: point of asserting them.
+#:
+#: Note the distinction the document draws: `stops` here is the RAW ROW COUNT of
+#: stops.txt. Only 9,630 of those rows are importable; the other 667 are
+#: coordinate-less location_type=3 pathway nodes (section 6.2.1). The database
+#: gate in tests/integration asserts 9,630.
 EXPECTED = {
     "routes": 399,
     "stops": 10_297,
     "trips": 89_080,
     "stop_times": 2_221_062,
 }
+
+#: Rows in stops.txt that carry no coordinates, all location_type=3.
+EXPECTED_COORDINATELESS_STOPS = 667
+EXPECTED_ROUTABLE_STOPS = EXPECTED["stops"] - EXPECTED_COORDINATELESS_STOPS
 
 requires_feed = pytest.mark.skipif(
     not MBTA_ZIP.exists(), reason="data/mbta_gtfs.zip absent (it is git-ignored)"
@@ -84,6 +93,40 @@ def test_mbta_feed_has_the_documented_entity_counts():
     assert counts.stops == EXPECTED["stops"]
     assert counts.trips == EXPECTED["trips"]
     assert counts.stop_times == EXPECTED["stop_times"]
+
+
+@requires_feed
+def test_coordinateless_stops_are_pathway_nodes_never_served_by_a_trip():
+    """Why 667 stop rows are excluded at import (SOLUTION.md section 6.2.1).
+
+    This asserts the *justification*, not just the number. If a future feed ever
+    omits coordinates on a stop that trips actually serve, this fails loudly --
+    which is the moment to revisit the exclusion rather than lose a real stop.
+    """
+    import csv
+    import io as _io
+    import zipfile as _zipfile
+
+    with _zipfile.ZipFile(MBTA_ZIP) as zf:
+        with zf.open("stops.txt") as fh:
+            rows = list(csv.DictReader(_io.TextIOWrapper(fh, "utf-8-sig", newline="")))
+        coordinateless = {
+            r["stop_id"] for r in rows if not r.get("stop_lat") or not r.get("stop_lon")
+        }
+        assert len(coordinateless) == EXPECTED_COORDINATELESS_STOPS
+
+        # Every one of them is a generic node (location_type 3).
+        assert {
+            r.get("location_type") for r in rows if r["stop_id"] in coordinateless
+        } == {"3"}
+
+        # And no trip serves any of them, so excluding them loses no service.
+        with zf.open("stop_times.txt") as fh:
+            served = {
+                r["stop_id"]
+                for r in csv.DictReader(_io.TextIOWrapper(fh, "utf-8-sig", newline=""))
+            }
+    assert coordinateless.isdisjoint(served)
 
 
 @requires_feed
