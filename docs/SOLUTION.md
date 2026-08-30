@@ -1450,6 +1450,22 @@ def csv_to_parquet(csv_path: Path, out_dir: Path, kind: Literal["vp","tu"]) -> l
 This is the fix for the 864 MB redundancy problem. The raw CSV is retained as the archive; all
 downstream reads use Parquet.
 
+**Malformed rows.** The recorder appends continuously, so its CSV is expected to end mid-write:
+the final line is routinely truncated. The converter therefore **skips malformed rows and counts
+them**, reporting the count alongside the row totals. If malformed rows exceed **0.1% of input**,
+the conversion **fails** rather than returning: a torn final line is normal, but widespread
+tearing means the capture itself is broken and the output must not be presented as a faithful
+archive.
+
+**One writer per file.** The capture format assumes a single appending process. Concurrent
+recorders writing the same CSV interleave mid-row and produce torn lines no downstream step can
+reconstruct, on top of multiply-recording every observation. Before a long capture, confirm
+exactly one recorder is running.
+
+**Positions are never deduplicated.** A stationary vehicle legitimately re-reports the same
+position, and collapsing those would destroy dwell time, which is a feature (§9.2). Only
+TripUpdates carry a dedup key.
+
 ### 28.3 `adapters/replay.py`
 
 ```python
@@ -1654,7 +1670,7 @@ Each phase is complete only when its gate passes. Gates are executable tests, no
 | **P0.1** | `contracts/`, `config.py`, city profiles | `pytest tests/unit/test_contracts.py` — a model missing `provenance` raises `ValidationError`. |
 | **P0.2** | `migrations/001–004`, docker-compose (Postgres+PostGIS+Timescale+Redis) | `docker compose up -d && psql -f migrations/*.sql` applies cleanly from empty. |
 | **P0.3** | `ingest/gtfs_import.py` | Importing `data/mbta_gtfs.zip` yields exactly 399 routes, **9,630 stops with geometry**, 89,080 trips, 2,221,062 stop-times. (667 coordinate-less `location_type=3` pathway nodes are excluded by design — §6.2.1.) Re-import returns the **same** `feed_version_id`. |
-| **P0.4** | `ingest/convert.py` | Full CSV corpus converts to Parquet; TripUpdates row count drops materially after dedup; peak RSS stays under 1 GB. |
+| **P0.4** | `ingest/convert.py` | Full CSV corpus converts to Parquet; TripUpdates row count drops materially after dedup; malformed rows are counted and stay under 0.1%; peak RSS stays under 1 GB. |
 | **P1.1** | `adapters/base.py`, `gtfs_rt.py`, `mbta.py` | Live poll produces valid `VehiclePositionEvent`s; zero records lack provenance. |
 | **P1.2** | `ingest/validate.py`, `mapmatch.py`, `stop_passage.py` | Map-match success >95% on a clean replay sample (§21); impossible-speed positions rejected. |
 | **P1.3** | `state/redis_state.py`, `headway.py` | Latest-state reads < 5 ms; headway computed for a known bunching case. |
@@ -1769,6 +1785,7 @@ navigation apps have no incentive to build.
 | 2026-08-30 | ADR-10 and §28.2 added: CSV capture → Parquet conversion | 864 MB of near-duplicate TripUpdates rows | Owner |
 | 2026-08-30 | **Part II added** (§25–§32): repo layout, contracts, DDL, module specs, API schemas, config, build gates | Makes "built exactly to the document" a checkable claim | Owner |
 | 2026-08-30 | §6.2.1, §28.1, §31: stop gate corrected from 10,297 to **9,630 stops with geometry**; 667 coordinate-less `location_type=3` pathway nodes excluded by design | The §31 gate figure (raw row count) contradicted the §27 `geom NOT NULL` schema. Surfaced by the P0.3 integration gate failing. Schema unchanged; the importer refuses to invent coordinates | Owner |
+| 2026-08-30 | §28.2, §31: malformed rows skipped and counted, conversion fails above 0.1%; single-writer requirement stated | A live append-only CSV always ends mid-write, so strict failure is unusable; silent skipping would let a broken capture report success. Surfaced when three concurrent recorders produced torn rows | Owner |
 
 > **To propose a change:** add a row here with the date, the change, the rationale and a blank
 > Approved column; edit the relevant section; and raise it with the project owner. Do not write

@@ -1,28 +1,29 @@
 # PROJECT_STATE.md
 # ── Living State Document — Update Every Session ────────────────
-# Last Updated: 2026-08-30 08:20 IST | By: AI (Claude Opus 5)
+# Last Updated: 2026-08-30 09:05 IST | By: AI (Claude Opus 5)
 
 ## Current Phase
-**Phase P0 — Data foundation.** P0.1 (contracts + config), P0.2 (schema + compose stack) and
-P0.3 (GTFS importer) are **complete and verified against a live database**. P0.4 (CSV → Parquet
-conversion) is the next build item and has not been started.
+**Phase P0 — Data foundation: COMPLETE.** P0.1 (contracts + config), P0.2 (schema + compose
+stack), P0.3 (GTFS importer) and P0.4 (CSV → Parquet conversion) are all built and their
+acceptance gates verified. Next phase is **P1 — Live fleet**.
 
 ## Current Status
-The repository has a binding specification, [`docs/SOLUTION.md`](docs/SOLUTION.md), and the P0
-foundation is built to it and proven. **41 tests pass (38 unit + 3 integration), ruff clean.**
+**56 tests pass (53 unit + 3 corpus integration + 3 database integration), ruff clean.**
 
-The compose stack runs: TimescaleDB-HA + PostGIS and Redis, both healthy. Migrations 001–004
-applied cleanly from an empty volume — both extensions, all 12 tables, all 4 hypertables. The
-GTFS importer has round-tripped the real feed twice: 399 routes, 9,630 routable stops, 89,080
-trips and **2,221,062 stop-times** in ~100 s, idempotent on re-import (same `feed_version_id`,
-nothing rewritten), with overnight times past 86400 s preserved.
+P0.4 landed: `ingest/convert.py` streams the recorder CSVs into date-partitioned Parquet.
+Measured on the real corpus — TripUpdates 10,854,177 rows in → 3,917,785 out (**63.9% duplicates
+dropped**), 0.91 GB → 0.02 GB; VehiclePositions 2,889,716 rows, 0.43 GB → 0.03 GB. 76 malformed
+rows skipped across both (0.0004% and 0.0011%, both far under the 0.1% ceiling). Peak RSS within
+the 1 GB budget. **1.34 GB of CSV now reads as 0.05 GB of Parquet.**
 
-The first integration run **failed usefully** and produced the first exercise of the doc-first
-rule: the §31 gate demanded 10,297 stops while §27 declared `geom NOT NULL`. Investigation showed
-667 of those rows are coordinate-less `location_type=3` pathway nodes that no trip serves. The
-document was amended with the owner's approval (Appendix C), *then* the code followed.
+A data-integrity problem was found and stopped: **three `record_feed.py` processes were appending
+to the same two CSVs concurrently**, multiply-recording every observation and interleaving
+mid-row to produce torn lines. PIDs 52120 and 66296 were stopped with the owner's approval;
+**PID 39404 (running since 2026-08-28 19:33) continues uninterrupted.**
 
-The recorder has still never stopped, as intended.
+Two document amendments were made this session, both approved before any code changed and both
+logged in Appendix C: the stop-count gate (§6.2.1/§28.1/§31), and the malformed-row policy
+plus single-writer requirement (§28.2/§31).
 
 Not started: adapters, map matching, state, features, models, routing, API, frontend.
 
@@ -36,14 +37,13 @@ Not started: adapters, map matching, state, features, models, routing, API, fron
   see Known Issues.
 
 ## Next Session Must Start With
-> Build **P0.4**: `src/pravaah/ingest/convert.py`, the CSV → date-partitioned Parquet converter
-> specified in SOLUTION.md §28.2. It must stream in chunks (peak RSS under 1 GB, never load the
-> whole CSV), write `parquet/kind=<vp|tu>/date=YYYY-MM-DD/part-NNN.parquet`, and deduplicate
-> TripUpdates on `(trip_id, stop_id, stop_sequence, arrival_time, departure_time)` — consecutive
-> polls re-emit near-identical rows, which is the whole 864 MB problem. Gate: the corpus
-> converts, the TripUpdates row count drops materially after dedup, and peak RSS stays under 1 GB.
-> `pandas` and `pyarrow` are pinned in `requirements.txt` but **not yet installed** — install them
-> first.
+> Begin **P1 — Live fleet**, starting with P1.1: `adapters/base.py`, `adapters/gtfs_rt.py` and
+> `adapters/mbta.py` per SOLUTION.md §25 and §28. The adapter converts GTFS-Realtime protobuf
+> into `VehiclePositionEvent` (already defined and tested in `contracts/events.py`). Gate: a live
+> poll produces valid events and **zero records lack provenance**.
+> Two constraints the contracts already enforce, so do not fight them: adapters must leave
+> `speed_mps` as None (it is derived later, §28.4), and a missing `occupancy_status` maps to
+> `OccupancyClass.UNKNOWN`, never `EMPTY`.
 
 ## Environment Notes
 - OS: Windows 11 Home Single Language 10.0.26200
@@ -79,6 +79,12 @@ Not started: adapters, map matching, state, features, models, routing, API, fron
 | Forecasts are quantiles (p10/p50/p90), never point estimates | Calibration is a KPI; uncertainty is a pitch differentiator. | 2026-08-27 |
 
 ## Known Issues / Tech Debt
+- **The recorded corpus is multiply-written for 2026-08-28 → 08-30.** Three recorders ran
+  concurrently, so vehicle-position rows repeat with the same `vehicle_ts` under different
+  `ingest_ts` (~2.89M rows recorded where one process logged ~1.27M). The converter deliberately
+  does not deduplicate positions (§28.2), so **the feature layer must decide** whether to
+  deduplicate on `(vehicle_id, vehicle_ts)` before training on this window. Data recorded after
+  09:00 on 2026-08-30 is single-sourced and clean.
 - **Compose host port and the documented DSN disagree.** `docker-compose.yml` publishes 15432
   (because another project's container owns 5432 here), while SOLUTION.md §30.2 and
   `config/settings.toml` still document `localhost:5432`. A fresh clone on a clean machine will

@@ -16,6 +16,41 @@
 #
 # ──────────────────────────────────────────────────────────────
 
+## [2026-08-30 09:05 IST] — P0.4 complete; three concurrent recorders found and stopped | By: AI
+
+### Done This Session
+- **Built P0.4**, `src/pravaah/ingest/convert.py`: streams recorder CSVs into date-partitioned
+  Parquet, deduplicating TripUpdates on the key §28.2 fixes. **Gate passes on the real corpus** —
+  TripUpdates 10,854,177 rows → 3,917,785 (**63.9% duplicates dropped**), 0.91 GB → 0.02 GB;
+  VehiclePositions 2,889,716 rows, 0.43 GB → 0.03 GB. Peak RSS inside the 1 GB budget.
+- **Found and stopped a data-integrity problem.** Three `record_feed.py` processes were appending
+  to the same two CSVs concurrently — multiply-recording every observation and interleaving
+  mid-row into torn lines. With the owner's approval, stopped PIDs 52120 and 66296 and kept
+  PID 39404 running so recording never paused.
+- **Amended §28.2 (approved, Appendix C)** with the malformed-row policy — skip and count, fail
+  above 0.1% — plus an explicit single-writer requirement and the rationale for never
+  deduplicating positions. Document first, then code, both times.
+- **56 tests pass (53 unit + 6 integration), ruff clean.**
+
+### Errors Hit
+- **Torn rows do not always have the wrong column count.** An interleaved fragment landed with
+  exactly 18 commas but an `ingest_ts` of `:46.962563`, which produced a partition directory
+  named `date=:46.962563` — not even a legal Windows path. Column-count validation alone is
+  insufficient; added `_drop_unusable_timestamps` to require an ISO-8601 prefix, counted as
+  malformed under the same policy.
+- **Row accounting was off by exactly 8.** pyarrow's schema-sniffing pass reads the first block
+  and invoked the counting handler, inflating `rows_read` before the real pass ran. The sniffing
+  pass now uses a non-counting handler. Caught only because the corpus test asserts the three
+  outcomes partition the input exactly.
+- Three separate runs reported **exit code 0 while tests failed** (the pipe to `tail` masks
+  pytest's status). Results were read from the summary line, never the exit code.
+
+### Next Session Must
+- Begin **P1.1**: `adapters/base.py`, `gtfs_rt.py`, `mbta.py`. Gate: a live poll produces valid
+  `VehiclePositionEvent`s and zero records lack provenance.
+
+---
+
 ## [2026-08-30 08:20 IST] — P0.2 and P0.3 gates verified against a live database | By: AI
 
 ### Done This Session
