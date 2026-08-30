@@ -30,6 +30,8 @@ from .schemas import (
     JourneyOption,
     PlanResponse,
     StopForecast,
+    StopPoint,
+    TripDetailResponse,
     TripForecastResponse,
     VehicleResponse,
     VehicleView,
@@ -854,3 +856,66 @@ def _route_names(cur, feed_version_id: int) -> dict[str, str]:
         )
         _ROUTE_NAMES[feed_version_id] = dict(cur.fetchall())
     return _ROUTE_NAMES[feed_version_id]
+
+
+@router.get("/trips/{trip_id}", response_model=TripDetailResponse)
+def trip_detail(request: Request, trip_id: str) -> TripDetailResponse:
+    """Where this bus came from, where it is going, and the path between.
+
+    The network carries no separate shape geometry, so the path *is* the ordered
+    stop coordinates. That matters: a client drawing a smoothed or invented line
+    would put a route where no bus actually goes.
+    """
+    resources = _resources(request)
+    if resources.db_pool is None:
+        raise _fail(ErrorCode.FEED_UNAVAILABLE, "schedule database unavailable", status=503)
+
+    current = now()
+    tz = _zoneinfo(resources.city.timezone)
+    midnight = _service_midnight(current, tz)
+
+    with resources.db_pool.connection() as conn, conn.cursor() as cur:
+        feed_version_id = _latest_feed_version(cur, resources.city.city_id)
+        cur.execute(
+            """
+            SELECT st.stop_sequence, st.stop_id, s.name,
+                   ST_Y(s.geom::geometry), ST_X(s.geom::geometry),
+                   st.arrival_seconds, t.route_id, t.direction_id, r.long_name
+              FROM stop_time st
+              JOIN stop s ON s.feed_version_id = st.feed_version_id AND s.stop_id = st.stop_id
+              JOIN trip t ON t.feed_version_id = st.feed_version_id AND t.trip_id = st.trip_id
+              LEFT JOIN route r
+                ON r.feed_version_id = st.feed_version_id AND r.route_id = t.route_id
+             WHERE st.feed_version_id = %s AND st.trip_id = %s
+             ORDER BY st.stop_sequence
+            """,
+            (feed_version_id, trip_id),
+        )
+        rows = cur.fetchall()
+
+    if not rows:
+        raise _fail(ErrorCode.NO_ROUTE_FOUND, f"unknown trip {trip_id}", status=404)
+
+    stops = [
+        StopPoint(
+            stop_id=stop_id,
+            name=name,
+            lat=lat,
+            lon=lon,
+            stop_sequence=sequence,
+            scheduled_arrival=midnight + timedelta(seconds=int(arrival_s)),
+        )
+        for sequence, stop_id, name, lat, lon, arrival_s, _r, _d, _rn in rows
+    ]
+
+    return TripDetailResponse(
+        generated_at=current,
+        city_id=resources.city.city_id,
+        trip_id=trip_id,
+        route_id=rows[0][6],
+        route_name=rows[0][8],
+        direction_id=rows[0][7],
+        origin=stops[0],
+        destination=stops[-1],
+        stops=stops,
+    )

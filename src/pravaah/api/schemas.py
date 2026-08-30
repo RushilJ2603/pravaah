@@ -357,3 +357,32 @@ class OccupancyReportRequest(BaseModel):
     vehicle_id: str = Field(min_length=1, max_length=128)
     occupancy_class: OccupancyClass
     reported_at: AwareDatetime
+
+
+class StopPoint(BaseModel):
+    """One stop on a trip's path, with the coordinates a client draws."""
+
+    model_config = ConfigDict(frozen=True)
+
+    stop_id: str
+    name: str
+    lat: float
+    lon: float
+    stop_sequence: int
+    scheduled_arrival: datetime | None = None
+
+
+class TripDetailResponse(BaseModel):
+    """GET /v1/trips/{tripId} (section 29.6)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    generated_at: datetime
+    city_id: str
+    trip_id: str
+    route_id: str | None
+    route_name: str | None
+    direction_id: int | None
+    origin: StopPoint
+    destination: StopPoint
+    stops: list[StopPoint]

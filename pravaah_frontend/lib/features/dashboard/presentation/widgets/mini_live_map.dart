@@ -6,6 +6,9 @@ import 'package:geolocator/geolocator.dart';
 import '../../providers/vehicle_provider.dart';
 import '../../../../theme/app_theme.dart';
 import '../../data/models.dart';
+import '../../../../core/api/api_client.dart';
+import '../../../../core/api/models.dart' as api;
+import '../../../journey/providers/plan_provider.dart';
 
 class MiniLiveMap extends ConsumerStatefulWidget {
   const MiniLiveMap({super.key});
@@ -17,6 +20,9 @@ class MiniLiveMap extends ConsumerStatefulWidget {
 class _MiniLiveMapState extends ConsumerState<MiniLiveMap> {
   final MapController _mapController = MapController();
   final String _currentBbox = "28.40,76.80,28.90,77.50";
+
+  /// Trip of the tapped bus. Drives both the highlighted path and the sheet.
+  String? _selectedTripId;
   
   Position? _currentPosition;
   bool _isLoadingLocation = false;
@@ -97,6 +103,8 @@ class _MiniLiveMapState extends ConsumerState<MiniLiveMap> {
                   loading: () => const MarkerLayer(markers: []),
                   error: (e, stack) => const MarkerLayer(markers: []),
                 ),
+                // Path of the tapped bus, under the markers.
+                _buildSelectedPath(),
                 // Blue Dot for User Location
                 if (_currentPosition != null)
                   MarkerLayer(
@@ -178,7 +186,9 @@ class _MiniLiveMapState extends ConsumerState<MiniLiveMap> {
       point: LatLng(v.lat, v.lon),
       width: 40,
       height: 40,
-      child: Stack(
+      child: GestureDetector(
+        onTap: () => _showVehicleDetail(v),
+        child: Stack(
         alignment: Alignment.center,
         children: [
           Container(
@@ -206,8 +216,133 @@ class _MiniLiveMapState extends ConsumerState<MiniLiveMap> {
                 child: const Icon(Icons.warning, size: 10, color: Colors.white),
               ),
             ),
-        ],
+          ],
+        ),
       ),
     );
   }
+
+  /// Show where this bus came from, where it is going, and draw its path.
+  void _showVehicleDetail(Vehicle v) {
+    final tripId = v.tripId;
+    setState(() => _selectedTripId = tripId);
+    showModalBottomSheet<void>(
+      context: context,
+      showDragHandle: true,
+      builder: (context) => _VehicleDetailSheet(vehicle: v),
+    ).whenComplete(() {
+      if (mounted) setState(() => _selectedTripId = null);
+    });
+  }
+
+  /// The tapped trip's path, drawn from its real stop coordinates.
+  Widget _buildSelectedPath() {
+    final tripId = _selectedTripId;
+    if (tripId == null) return const SizedBox.shrink();
+    return ref.watch(tripDetailProvider(tripId)).when(
+          loading: () => const SizedBox.shrink(),
+          error: (_, _) => const SizedBox.shrink(),
+          data: (trip) => PolylineLayer(
+            polylines: [
+              Polyline(
+                points: trip.stops.map((s) => LatLng(s.lat, s.lon)).toList(),
+                strokeWidth: 4,
+                color: AppTheme.primaryBlue.withAlpha(180),
+              ),
+            ],
+          ),
+        );
+  }
+}
+
+/// Origin, destination and the stop list for one vehicle.
+class _VehicleDetailSheet extends ConsumerWidget {
+  const _VehicleDetailSheet({required this.vehicle});
+
+  final Vehicle vehicle;
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final tripId = vehicle.tripId;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 0, 20, 24),
+      child: tripId == null
+          // A vehicle between assignments genuinely has no trip. Say so rather
+          // than showing an empty route.
+          ? const Text('This bus is not currently assigned to a trip.')
+          : ref.watch(tripDetailProvider(tripId)).when(
+                loading: () => const Padding(
+                  padding: EdgeInsets.all(24),
+                  child: Center(child: CircularProgressIndicator()),
+                ),
+                error: (e, _) => Text(e is ApiException
+                    ? e.friendlyMessage
+                    : 'Could not load this trip.'),
+                data: (trip) => _content(context, trip),
+              ),
+    );
+  }
+
+  Widget _content(BuildContext context, api.TripDetail trip) {
+    final crowd = api.CrowdLevel.fromWire(vehicle.occupancyClass);
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text('Route ${trip.routeId ?? ""}',
+            style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+        if (trip.routeName != null)
+          Text(trip.routeName!,
+              style: const TextStyle(
+                  fontSize: 13, color: AppTheme.textSecondary)),
+        const SizedBox(height: 16),
+        _endpoint(Icons.trip_origin, 'From', trip.origin.name),
+        Padding(
+          padding: const EdgeInsets.only(left: 11),
+          child: Container(
+              width: 2, height: 18, color: AppTheme.textSecondary.withAlpha(60)),
+        ),
+        _endpoint(Icons.place, 'To', trip.destination.name),
+        const SizedBox(height: 16),
+        Row(
+          children: [
+            const Icon(Icons.people_outline, size: 16),
+            const SizedBox(width: 6),
+            // Crowding always carries a text label, never colour alone.
+            Text(crowd.label, style: const TextStyle(fontSize: 13)),
+            const Spacer(),
+            Text('${trip.stops.length} stops',
+                style: const TextStyle(
+                    fontSize: 12, color: AppTheme.textSecondary)),
+          ],
+        ),
+        if (vehicle.isStale)
+          const Padding(
+            padding: EdgeInsets.only(top: 8),
+            child: Text('Live tracking delayed',
+                style: TextStyle(fontSize: 12, color: Colors.orange)),
+          ),
+      ],
+    );
+  }
+
+  Widget _endpoint(IconData icon, String label, String name) => Row(
+        children: [
+          Icon(icon, size: 22, color: AppTheme.primaryBlue),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(label,
+                    style: const TextStyle(
+                        fontSize: 11, color: AppTheme.textSecondary)),
+                Text(name,
+                    style: const TextStyle(
+                        fontSize: 15, fontWeight: FontWeight.w600)),
+              ],
+            ),
+          ),
+        ],
+      );
 }

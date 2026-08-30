@@ -167,9 +167,17 @@ def optional_staff(
 def require_conductor(
     identity: Annotated[StaffIdentity | None, Depends(optional_staff)],
 ) -> StaffIdentity:
-    """Require a conductor token for a live-state write."""
-    if identity is None or identity.role != "CONDUCTOR":
+    """Require a conductor token for a live-state write.
+
+    The two failures are distinct and must stay distinct: absent credentials
+    are a 401 the client fixes by signing in, whereas a valid token with the
+    wrong role is a 403 that signing in again can never resolve. Collapsing
+    them sends an already-authenticated operator into a re-login loop.
+    """
+    if identity is None:
         raise _unauthorized("conductor credentials required")
+    if identity.role != "CONDUCTOR":
+        raise _forbidden("conductor credentials required")
     return identity
 
 

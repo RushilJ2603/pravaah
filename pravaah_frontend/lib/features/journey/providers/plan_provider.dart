@@ -55,3 +55,10 @@ final tripForecastProvider =
       await ref.read(apiClientProvider).getJson('/v1/trips/$tripId/forecast');
   return TripForecast.fromJson(json);
 });
+
+/// Origin, destination and path for one trip, for the vehicle detail sheet.
+final tripDetailProvider =
+    FutureProvider.family<TripDetail, String>((ref, tripId) async {
+  final json = await ref.read(apiClientProvider).getJson('/v1/trips/$tripId');
+  return TripDetail.fromJson(json);
+});

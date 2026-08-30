@@ -262,3 +262,218 @@ enum PlanProfile {
   final String wire;
   final String label;
 }
+
+/// One predicted crowding hotspot from `GET /v1/admin/hotspots`.
+class Hotspot {
+  const Hotspot({
+    required this.stopId,
+    required this.stopName,
+    required this.routeId,
+    required this.predictedAt,
+    required this.leadTimeMin,
+    required this.servicesInWindow,
+    required this.severity,
+    required this.crowd,
+    required this.reason,
+    this.routeShortName,
+  });
+
+  final String stopId;
+  final String stopName;
+  final String routeId;
+  final String? routeShortName;
+  final DateTime predictedAt;
+
+  /// Minutes of warning. The operator's entire value is lead time -- a hotspot
+  /// with none is a report of something already going wrong.
+  final int leadTimeMin;
+  final int servicesInWindow;
+  final int severity;
+  final CrowdBand crowd;
+  final String reason;
+
+  static Hotspot fromJson(Map<String, dynamic> json) => Hotspot(
+        stopId: json['stop_id'] as String,
+        stopName: json['stop_name'] as String? ?? 'Stop',
+        routeId: json['route_id'] as String,
+        routeShortName: json['route_short_name'] as String?,
+        predictedAt: DateTime.parse(json['predicted_at'] as String),
+        leadTimeMin: (json['lead_time_min'] as num?)?.toInt() ?? 0,
+        servicesInWindow: (json['services_in_window'] as num?)?.toInt() ?? 0,
+        severity: (json['severity'] as num?)?.toInt() ?? 0,
+        crowd: CrowdBand.fromJson(
+            (json['crowd'] as Map<String, dynamic>?) ?? const {}),
+        reason: json['reason'] as String? ?? '',
+      );
+}
+
+class HotspotsResponse {
+  const HotspotsResponse({
+    required this.horizonMin,
+    required this.modelVersion,
+    required this.hotspots,
+  });
+
+  final int horizonMin;
+  final String modelVersion;
+  final List<Hotspot> hotspots;
+
+  static HotspotsResponse fromJson(Map<String, dynamic> json) => HotspotsResponse(
+        horizonMin: (json['horizon_min'] as num?)?.toInt() ?? 60,
+        modelVersion: json['model_version'] as String? ?? 'unknown',
+        hotspots: ((json['hotspots'] as List?) ?? const [])
+            .map((h) => Hotspot.fromJson(h as Map<String, dynamic>))
+            .toList(),
+      );
+}
+
+/// `GET /v1/admin/data-health`. Occupancy coverage is the field worth watching:
+/// a silent drop means the map keeps moving while the crowd layer goes blank.
+class DataHealth {
+  const DataHealth({
+    required this.database,
+    required this.redis,
+    required this.vehiclesTracked,
+    required this.vehiclesStale,
+    required this.vehiclesWithOccupancy,
+    required this.occupancyCoverage,
+    required this.oldestPositionAgeS,
+    required this.sourceTypes,
+    this.feedVersionId,
+    this.forecastModel,
+  });
+
+  final bool database;
+  final bool redis;
+  final int vehiclesTracked;
+  final int vehiclesStale;
+  final int vehiclesWithOccupancy;
+  final double occupancyCoverage;
+  final int oldestPositionAgeS;
+  final Map<String, int> sourceTypes;
+  final int? feedVersionId;
+  final String? forecastModel;
+
+  bool get isHealthy => database && redis && vehiclesTracked > 0;
+
+  static DataHealth fromJson(Map<String, dynamic> json) => DataHealth(
+        database: (json['database'] as bool?) ?? false,
+        redis: (json['redis'] as bool?) ?? false,
+        vehiclesTracked: (json['vehicles_tracked'] as num?)?.toInt() ?? 0,
+        vehiclesStale: (json['vehicles_stale'] as num?)?.toInt() ?? 0,
+        vehiclesWithOccupancy:
+            (json['vehicles_with_occupancy'] as num?)?.toInt() ?? 0,
+        occupancyCoverage:
+            (json['occupancy_coverage'] as num?)?.toDouble() ?? 0.0,
+        oldestPositionAgeS:
+            (json['oldest_position_age_s'] as num?)?.toInt() ?? 0,
+        sourceTypes: ((json['source_types'] as Map?) ?? const {})
+            .map((k, v) => MapEntry(k.toString(), (v as num).toInt())),
+        feedVersionId: (json['feed_version_id'] as num?)?.toInt(),
+        forecastModel: json['forecast_model'] as String?,
+      );
+}
+
+/// One hour of a route's predicted load, from `/v1/admin/routes/{id}/forecast`.
+class RouteHourForecast {
+  const RouteHourForecast({required this.hour, required this.crowd});
+  final int hour;
+  final CrowdBand crowd;
+
+  static RouteHourForecast fromJson(Map<String, dynamic> json) =>
+      RouteHourForecast(
+        hour: (json['hour'] as num).toInt(),
+        crowd: CrowdBand.fromJson(
+            (json['crowd'] as Map<String, dynamic>?) ?? const {}),
+      );
+}
+
+/// An active conductor shift. The shift is what binds a phone to a vehicle;
+/// without one the backend rejects every position report.
+class Shift {
+  const Shift({
+    required this.shiftId,
+    required this.startedAt,
+    required this.vehicleId,
+    this.routeId,
+  });
+
+  final int shiftId;
+  final DateTime startedAt;
+  final String vehicleId;
+  final String? routeId;
+
+  static Shift fromJson(Map<String, dynamic> json, String vehicleId, String? routeId) =>
+      Shift(
+        shiftId: (json['shift_id'] as num).toInt(),
+        startedAt: DateTime.parse(json['started_at'] as String),
+        vehicleId: vehicleId,
+        routeId: routeId,
+      );
+}
+
+/// One point on a trip's path.
+class StopPoint {
+  const StopPoint({
+    required this.stopId,
+    required this.name,
+    required this.lat,
+    required this.lon,
+    required this.stopSequence,
+    this.scheduledArrival,
+  });
+
+  final String stopId;
+  final String name;
+  final double lat;
+  final double lon;
+  final int stopSequence;
+  final DateTime? scheduledArrival;
+
+  static StopPoint fromJson(Map<String, dynamic> json) => StopPoint(
+        stopId: json['stop_id'] as String,
+        name: json['name'] as String? ?? 'Stop',
+        lat: (json['lat'] as num).toDouble(),
+        lon: (json['lon'] as num).toDouble(),
+        stopSequence: (json['stop_sequence'] as num?)?.toInt() ?? 0,
+        scheduledArrival: json['scheduled_arrival'] == null
+            ? null
+            : DateTime.parse(json['scheduled_arrival'] as String),
+      );
+}
+
+/// `GET /v1/trips/{tripId}` -- where a bus came from, where it is going, and
+/// the path between. The path is the ordered stop coordinates; the network
+/// carries no separate shape geometry, so drawing anything smoother would put
+/// a line where no bus actually goes.
+class TripDetail {
+  const TripDetail({
+    required this.tripId,
+    required this.origin,
+    required this.destination,
+    required this.stops,
+    this.routeId,
+    this.routeName,
+    this.directionId,
+  });
+
+  final String tripId;
+  final String? routeId;
+  final String? routeName;
+  final int? directionId;
+  final StopPoint origin;
+  final StopPoint destination;
+  final List<StopPoint> stops;
+
+  static TripDetail fromJson(Map<String, dynamic> json) => TripDetail(
+        tripId: json['trip_id'] as String,
+        routeId: json['route_id'] as String?,
+        routeName: json['route_name'] as String?,
+        directionId: (json['direction_id'] as num?)?.toInt(),
+        origin: StopPoint.fromJson(json['origin'] as Map<String, dynamic>),
+        destination: StopPoint.fromJson(json['destination'] as Map<String, dynamic>),
+        stops: ((json['stops'] as List?) ?? const [])
+            .map((s) => StopPoint.fromJson(s as Map<String, dynamic>))
+            .toList(),
+      );
+}

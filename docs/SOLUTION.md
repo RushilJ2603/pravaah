@@ -741,6 +741,7 @@ Executable DDL is in §27.
 |---|---|---|
 | GET | `/v1/plan` | Ranked itineraries for origin/destination/time/preference. |
 | GET | `/v1/trips/{tripId}/forecast` | Crowd + ETA forecast by upcoming stop. |
+| GET | `/v1/trips/{tripId}` | Trip detail: origin, destination and the ordered stop path. |
 | GET | `/v1/vehicles` | Fleet inside a viewport bounding box. **`bbox` is required** and the result is capped server-side (§12.4 rule 5). |
 | GET | `/v1/vehicles/{vehicleId}` | Current vehicle state and freshness. |
 | GET | `/v1/stops/{stopId}/departures` | Predicted upcoming departures with crowd status. |
@@ -1842,6 +1843,31 @@ Codes: `NO_ROUTE_FOUND`, `INVALID_COORDINATES`, `OUT_OF_SERVICE_AREA`, `FEED_UNA
 ```
 *Response:* `202 Accepted`
 
+
+### 29.6 `GET /v1/trips/{tripId}`
+
+```json
+{
+  "generated_at": "...", "city_id": "delhi",
+  "trip_id": "DL420-0-1300", "route_id": "DL420",
+  "route_name": "Kashmere Gate ISBT to Connaught Place",
+  "direction_id": 0,
+  "origin": {"stop_id": "DLN0005", "name": "Kashmere Gate ISBT", "lat": 28.6675, "lon": 77.2285},
+  "destination": {"stop_id": "DLN0000", "name": "Connaught Place", "lat": 28.6315, "lon": 77.2167},
+  "stops": [
+    {"stop_id": "DLN0005", "name": "Kashmere Gate ISBT", "lat": 28.6675, "lon": 77.2285,
+     "stop_sequence": 1, "scheduled_arrival": "..."}
+  ]
+}
+```
+
+Answers "where is this bus coming from, where is it going, and by what path" when a
+passenger taps a vehicle. `stops` is ordered by `stop_sequence`, so a client draws the
+path by joining the coordinates -- the network carries no separate shape geometry, and
+inventing one client-side would put a drawn line where no bus goes.
+
+---
+
 ## 30. Configuration and city profiles
 
 ### 30.1 City profile (`config/cities/mbta.toml`)
@@ -2252,6 +2278,8 @@ navigation apps have no incentive to build.
 | 2026-08-30 | §29.4: added `UNAUTHORIZED` and `FORBIDDEN` error codes | Auth failures were serializing as `INTERNAL`, so a client could not distinguish "log in again" from "the server broke". Both are ordinary outcomes of a role-gated API and need their own codes | Owner |
 
 | 2026-08-30 | §25: added `scripts/demo.sh` | The demo took six manual steps, each with an environment trap (Windows interpreter, WSLENV, running from `src/`, a 25 s health wait). A demo that cannot be started reliably is not a demo | Owner |
+
+| 2026-08-30 | §12.1, §29.6: added `GET /v1/trips/{tripId}` returning origin, destination and the ordered stop path | Tapping a vehicle could show its position but not where it was going. The client had filled the gap with a hardcoded polyline, which drew the same route for every journey | Owner |
 
 > **To propose a change:** add a row here with the date, the change, the rationale and a blank
 > Approved column; edit the relevant section; and raise it with the project owner. Do not write

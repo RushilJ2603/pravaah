@@ -5,6 +5,7 @@ import '../../features/dashboard/presentation/dashboard_screen.dart';
 import '../../features/journey/presentation/journey_screen.dart';
 import '../../features/saved/presentation/saved_screen.dart';
 import '../../features/profile/presentation/profile_screen.dart';
+import '../../features/staff/presentation/staff_screen.dart';
 
 final rootNavigatorKey = GlobalKey<NavigatorState>();
 final dashboardNavigatorKey = GlobalKey<NavigatorState>();
@@ -58,6 +59,14 @@ final appRouter = GoRouter(
           ],
         ),
       ],
+    ),
+    // Staff consoles sit outside the passenger tab shell: an operator needs the
+    // whole screen, and a conductor must not be one stray tap from the
+    // passenger UI while working.
+    GoRoute(
+      parentNavigatorKey: rootNavigatorKey,
+      path: '/staff',
+      builder: (context, state) => const StaffScreen(),
     ),
   ],
 );
