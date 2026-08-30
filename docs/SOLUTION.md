@@ -771,6 +771,14 @@ Executable DDL is in §27.
 4. Return stable IDs for route, trip, vehicle and stop so clients can subscribe to updates.
 5. Use pagination / viewport bounding boxes for operator map endpoints to prevent payload explosion.
 
+### 12.5 Conductor APIs
+
+To support cities without public feeds (like Delhi), we provide an ingestion endpoint for conductors.
+- `POST /v1/telemetry/conductor`
+  - Accepts a stream of `VehiclePositionEvent` and manual `OccupancyObservation` objects.
+  - Tags data with `source_type=CONDUCTOR_APP`.
+  - Injects directly into Redis state and telemetry tables, bypassing GTFS polling.
+
 ---
 
 ## 13. Runtime flows and sequence behaviour
@@ -874,6 +882,7 @@ have no connectivity, and the live feed may be down at the wrong moment. Both pa
 |---|---|
 | Transport feed credentials | Secrets manager; never embed keys in the frontend; rotate and scope; outbound proxy if required. |
 | Passenger authentication | Optional for anonymous planning; OAuth/OIDC for accounts; short-lived tokens. |
+| Conductor authentication | Mandatory (JWT/API Keys). Conductors have write access to system state; unauthenticated POSTs are strictly forbidden to prevent GPS spoofing. |
 | Operator access | RBAC roles (viewer, dispatcher, admin); MFA for privileged accounts. |
 | Transport security | TLS everywhere; certificate validation; secure WebSocket. |
 | Data at rest | Encrypted managed disks/object storage; encrypted backups. |
@@ -1862,11 +1871,11 @@ class locally.
 
 | Concern | Choice |
 |---|---|
-| Framework | React 18 + TypeScript, built with Vite |
-| Map | MapLibre GL JS (no proprietary tile key required) |
-| Data fetching | TanStack Query for reads; one WebSocket for live updates (§12.1) |
-| Styling | CSS modules or Tailwind -- one, not both |
-| Build output | Static assets served by Caddy (§14.4); the frontend is never a Node server in production |
+| Framework | Flutter (Dart), targeting Web and Mobile |
+| Map | flutter_map + pmtiles (offline-capable self-hosted Protomaps) |
+| Data fetching | Standard networking + one WebSocket for live updates (§12.1) |
+| State/Styling | Riverpod/Provider, native Flutter styling |
+| Build output | Flutter Web assets served by Caddy (§14.4), and/or compiled mobile APKs |
 
 Types are generated from the FastAPI OpenAPI schema, so the client cannot drift from §29.
 
@@ -1878,6 +1887,7 @@ Types are generated from the FastAPI OpenAPI schema, so the client cannot drift 
 | `/plan` journey planner | Origin/destination, four preference profiles, ranked options with reasons | C.4 |
 | `/journey/:id` live journey | The active trip, re-scored as conditions change | D.2 |
 | `/operator` dashboard | Predicted hotspots with lead time, route forecast, fleet health | E.2 |
+| `/*` (Conductor Mode) | High-contrast UI for manual GPS/occupancy inputs; background GPS polling | A.5 |
 
 ### 33.3 Data-state rules (binding)
 
@@ -2006,6 +2016,8 @@ navigation apps have no incentive to build.
 | 2026-08-30 | **§33 added: frontend specification** | The frontend was named in §25 and §23 but had no specification and only one incidental gate across 17 phase rows. It is a working application, so its data-state rules (unknown is never empty, uncertainty always visible, reasons always shown) are binding | Owner |
 | 2026-08-30 | **§14.4 added: public demo deployment on a single VM** | Deployment was absent from the build order entirely. One VM running the existing Compose stack keeps §27 unchanged, since TimescaleDB is unavailable on most managed free tiers. The offline replay requirement is retained, not replaced | Owner |
 | 2026-08-30 | **§12.1 and §29.2: added `GET /v1/vehicles` with a required bbox** | §33.2 mandates a live map and §12.4 rule 5 mandates viewport queries, but the passenger API only exposed a single-vehicle lookup, so the map could not be built from the contract as written. The operator API stays separate and RBAC-gated | Owner |
+| 2026-08-30 | **§33.1 stack changed to Flutter** | User preference to build a Flutter app rather than React. | Owner |
+| 2026-08-30 | **§12.5, §15, §33.2 Conductor Role Added** | Introduced a Conductor app/role to manually supply GPS and occupancy data, solving the Delhi "Cold Start" problem. | Owner |
 
 > **To propose a change:** add a row here with the date, the change, the rationale and a blank
 > Approved column; edit the relevant section; and raise it with the project owner. Do not write
