@@ -22,38 +22,48 @@ crowding hotspots with lead time. Users: passengers, transit control-room operat
 
 ## Directory Map
 ```
-SIH/                                       ← project root (NOT a git repo yet — see PROJECT_STATE.md)
-├── data/                                  ← the only code + data that exists today
-│   ├── record_feed.py                     ← GTFS-Realtime recorder → CSV (canonical VP_COLS/TU_COLS schemas)
+SIH/                                       ← project root (git repo)
+├── CLAUDE.md                              ← You are here (rules + pointers)
+├── PROJECT_STATE.md                       ← Current build status (read this!)
+├── CHANGELOG.md                           ← Full history (read last 3 entries)
+├── SESSION_LOG.md                         ← Personal detailed journal for the USER (write to it, don't read on onboarding)
+├── session_prompts.md                     ← Copy-paste prompts for the session start/end rituals
+├── .gitignore                             ← excludes the ~1.2 GB recorded corpus
+├── .context/
+│   ├── session.json                       ← Machine-readable LATEST-session state (well-known path)
+│   ├── sessions/                          ← Archive: every prior session.json (created at first session end)
+│   └── dead_ends.md                       ← Approaches already ruled out
+├── docs/
+│   └── SOLUTION.md                        ← ★ THE BINDING SPEC — code is built exactly to this
+├── config/                                ← settings.toml + cities/{mbta,delhi}.toml   [P0, planned]
+├── migrations/                            ← forward-only SQL                            [P0, planned]
+├── src/pravaah/                            ← application code — layout fixed by SOLUTION.md §25
+│   ├── contracts/ adapters/ ingest/ state/ features/ models/ routing/ ops/ api/
+├── tests/                                 ← unit/ integration/ parity/                  [planned]
+├── frontend/                              ← React + MapLibre                            [P4, planned]
+├── data/                                  ← recorder + corpus (git-ignored except scripts)
+│   ├── record_feed.py                     ← GTFS-Realtime recorder → CSV (canonical VP_COLS/TU_COLS)
 │   ├── START_RECORDING.bat                ← Windows launcher; leave the window open
-│   ├── mbta_gtfs.zip                      ← static GTFS snapshot (399 routes, 10,297 stops, 2.22M stop_times)
-│   ├── mbta_vehicle_positions.csv         ← ~1.27M rows, ~411 MB, real occupancy labels
-│   ├── mbta_trip_updates.csv              ← ~4.78M rows, ~864 MB, arrival/departure delays
+│   ├── mbta_gtfs.zip                      ← static GTFS (399 routes, 10,297 stops, 2,221,062 stop-times)
+│   ├── mbta_vehicle_positions.csv         ← ~411 MB, real occupancy labels
+│   ├── mbta_trip_updates.csv              ← ~864 MB, arrival/departure delays
 │   └── recorder.log                       ← per-poll counters, one line per 20 s
-├── templatesv2/                           ← the context bundle currently lives HERE, not at root
-│   ├── CLAUDE.md                          ← You are here (rules + pointers)
-│   ├── PROJECT_STATE.md                   ← Current build status (read this!)
-│   ├── CHANGELOG.md                       ← Full history (read last 3 entries)
-│   ├── SESSION_LOG.md                     ← Personal detailed journal for the USER (write to it, don't read on onboarding)
-│   ├── session_prompts.md                 ← Copy-paste prompts for the session start/end rituals
-│   └── .context/
-│       ├── session.json                   ← Machine-readable LATEST-session state (well-known path)
-│       ├── sessions/                      ← Archive: every prior session.json (created at first session end)
-│       └── dead_ends.md                   ← Approaches already ruled out
-├── Transit_Crowding_Route_Prediction_Solution_Architecture (1).docx  ← 25-section design source of truth
-├── PRAVAAH_SIH_Internal_Deck.pptx         ← 10-slide pitch: scope, comparison table, claimed deliverables
-└── SIH_NITK_241EC148_D4CULT.pdf           ← SIH submission artifact (not machine-parsed; open manually)
-
-  ── does not exist yet ──
-  src/     ← planned: ingest/ features/ models/ routing/ api/
-  tests/   ← planned: no test runner configured
-  docs/    ← planned: the .docx is standing in for it
+├── Transit_Crowding_Route_Prediction_Solution_Architecture (1).docx  ← frozen original, superseded by docs/SOLUTION.md
+├── PRAVAAH_SIH_Internal_Deck.pptx         ← 10-slide pitch
+└── SIH_NITK_241EC148_D4CULT.pdf           ← SIH submission artifact
 ```
-> **The Session Protocol at the bottom of this file uses root-relative paths** (`CLAUDE.md`,
-> `.context/session.json`, …). Those paths resolve only once this bundle is moved to the
-> project root. Until then, prefix them with `templatesv2/`.
 
 ## Coding Rules
+
+- **★ THE DOCUMENT IS BINDING.** `docs/SOLUTION.md` is the specification; the codebase is built
+  exactly to it. If you need to deviate — different schema, module boundary, library, endpoint
+  shape — **edit `docs/SOLUTION.md` first, get the owner's approval (log it in Appendix C), then
+  write the code.** A commit that diverges from the document without a prior approved doc edit
+  is a defect even if it works. If the document does not answer your question, it is incomplete:
+  propose an edit, do not improvise.
+- **The layout in §25 is fixed**, as are the contracts in §26, the DDL in §27 and the API shapes
+  in §29. `contracts/` imports nothing else in the package. No city name may appear outside
+  `adapters/` and `config/cities/`.
 - **The recorder is append-only and may be live right now.** `data/record_feed.py` opens CSVs with mode `"a"`. Never truncate, rewrite in place, or re-sort those files, and never edit `record_feed.py` while a recording is running — restart cost is permanent data loss for that window.
 - **Never hand-edit anything in `data/`.** Those CSVs are the training set and cannot be re-recorded for past time. Derive new files; do not mutate sources.
 - **Provenance is mandatory.** Every record keeps `source_type` (`PUBLIC_FEED` / `APC` / `CROWDSOURCED` / `SIMULATED`) and its timestamp. The architecture treats real vs. inferred vs. simulated as a first-class tag — never drop or default it.
@@ -95,7 +105,8 @@ tail -f data/recorder.log
 ```
 
 ## Key Reference Files
-- **Architecture source of truth:** `Transit_Crowding_Route_Prediction_Solution_Architecture (1).docx` — §4 requirements (FR-01…FR-16), §6 data strategy, §9 ML architecture, §10 routing/ranking, §12 API + event contracts, §20 roadmap (phases P0–P7 with exit criteria), §21 KPIs, §24 tech stack, Appendix A canonical JSON payloads.
+- **★ BINDING SPEC:** [`docs/SOLUTION.md`](docs/SOLUTION.md) — Part I is the architecture (§4 requirements FR-01…FR-16, §6 data strategy, §9 ML, §10 routing/ranking, §12 API + event contracts, §20 roadmap P0–P7, §21 KPIs, §23 stack); **Part II is the implementation contract** (§25 repo layout, §26 code-level contracts, §27 DDL, §28 module specs, §29 API schemas, §30 config, §31 build order with acceptance gates, §32 conventions). Appendix C is the doc change log — every deviation is recorded there.
+- **Frozen original:** `Transit_Crowding_Route_Prediction_Solution_Architecture (1).docx` — the 27 Aug submission artifact. Superseded by `docs/SOLUTION.md` for all engineering purposes; retained unmodified for provenance.
 - **Scope and claims:** `PRAVAAH_SIH_Internal_Deck.pptx` — slide 5 (competitor comparison), slide 7 (data strategy and measured feed counts), slide 9 (stack + promised deliverables).
 - **Canonical row schemas:** `data/record_feed.py` — `VP_COLS` and `TU_COLS` define the column contract every downstream reader must follow.
 - **Static network:** `data/mbta_gtfs.zip` — `routes.txt`, `stops.txt`, `trips.txt`, `stop_times.txt`, `shapes.txt`, `calendar*.txt`.
