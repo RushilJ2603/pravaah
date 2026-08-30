@@ -1,4 +1,5 @@
 import 'package:flutter/material.dart';
+import 'package:go_router/go_router.dart';
 import '../../../../theme/app_theme.dart';
 
 class ProfileScreen extends StatelessWidget {
@@ -47,6 +48,15 @@ class ProfileScreen extends StatelessWidget {
                   ]),
                   const SizedBox(height: 24),
                   
+                  // Staff access. Passengers never sign in; this is the way
+                  // in for operators and conductors, and the backend decides
+                  // which console the credential opens.
+                  _buildSettingsGroup('Staff', [
+                    _buildSettingItem(Icons.badge_outlined, 'Operator / Conductor sign in',
+                        onTap: () => context.push('/staff')),
+                  ]),
+                  const SizedBox(height: 24),
+
                   _buildSettingsGroup('Support', [
                     _buildSettingItem(Icons.help_outline, 'Help Center'),
                     _buildSettingItem(Icons.report_problem_outlined, 'Report an Issue'),
@@ -207,11 +217,12 @@ class ProfileScreen extends StatelessWidget {
     );
   }
 
-  Widget _buildSettingItem(IconData icon, String title, {String? trailingText}) {
+  Widget _buildSettingItem(IconData icon, String title,
+      {String? trailingText, VoidCallback? onTap}) {
     return Material(
       color: Colors.transparent,
       child: InkWell(
-        onTap: () {},
+        onTap: onTap ?? () {},
         borderRadius: BorderRadius.circular(24),
         child: Padding(
           padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 16),

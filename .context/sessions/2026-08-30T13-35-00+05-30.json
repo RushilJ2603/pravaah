@@ -1,0 +1,101 @@
+{
+  "_schema": "ai-context-bridge/session-v1",
+  "_note": "Auto-generated at session end. Do not edit manually. Before regenerating, the AI must archive the previous version of this file to .context/sessions/<generated_at-ISO>.json so machine-readable history is preserved. Commit with CHANGELOG.md, PROJECT_STATE.md, and SESSION_LOG.md.",
+  "generated_at": "2026-08-30T13:35:00+05:30",
+  "session_by": "AI (Claude Opus 5) with Somyak Mohanta",
+  "session_summary": "Pivoted the demo city to Delhi with a calibrated synthetic simulator, fixed the occupancy pipeline, and built forecasting, journey planning and the operator API into a working MVP",
+  "current_phase": "MVP backend - Delhi synthetic. Slice A complete, Slice B/C/E delivered in MVP form, Slice H (simulator) built. Conductor mode (Slice G) NOT built.",
+  "build_state": "Working API on Delhi synthetic data. Ten endpoints live and manually verified: /v1/health, /v1/vehicles, /v1/vehicles/{id}, /v1/stops/{id}/departures, /v1/trips/{id}/forecast, /v1/plan, /v1/admin/hotspots, /v1/admin/routes/{id}/forecast, /v1/admin/vehicles, /v1/admin/data-health. 111 unit tests pass, ruff clean. Compose stack up: TimescaleDB+PostGIS on host port 15432, Redis 6379. Synthetic Delhi network persisted as feed_version_id 6 (490 stops, 51 routes, 8568 trips, 113568 stop_times).",
+  "blocking_issue": "No trained model. The forecast served by /v1/trips/{id}/forecast and the operator endpoints is a Monte Carlo over the behavioural demand model (models/crowd.py), NOT a learned model. models/baseline.py is a genuine fitted model with a chronological split but has never been run, because it was written against the Boston corpus which was dropped from the product.",
+  "files_modified_this_session": [
+    "docs/SOLUTION.md",
+    "docs/FRONTEND_HANDOFF.md",
+    "config/settings.toml",
+    "config/cities/delhi.toml",
+    "config/calibration/delhi_v1.json",
+    "config/models/crowd_v1.json",
+    "src/pravaah/state/redis_state.py",
+    "src/pravaah/ingest/worker.py",
+    "src/pravaah/api/deps.py",
+    "src/pravaah/api/passenger.py",
+    "src/pravaah/api/schemas.py",
+    "src/pravaah/api/main.py",
+    "src/pravaah/api/admin.py",
+    "src/pravaah/sim/__init__.py",
+    "src/pravaah/sim/calibrate.py",
+    "src/pravaah/sim/network.py",
+    "src/pravaah/sim/demand.py",
+    "src/pravaah/sim/generate.py",
+    "src/pravaah/sim/persist.py",
+    "src/pravaah/models/__init__.py",
+    "src/pravaah/models/baseline.py",
+    "src/pravaah/models/crowd.py",
+    "tests/unit/test_worker.py",
+    "tests/integration/test_api.py",
+    "tests/integration/test_redis_state.py"
+  ],
+  "commands_run": [
+    "python -m pravaah.sim.calibrate --corpus data/mbta_vehicle_positions.csv",
+    "python -m pravaah.sim.generate --interval 5",
+    "python -m pravaah.sim.persist",
+    "python -m pravaah.models.crowd --out config/models/crowd_v1.json",
+    "python -m uvicorn pravaah.api.main:app --port 8015",
+    "python -m pytest tests/unit -q",
+    "python -m ruff check src tests"
+  ],
+  "decisions_made": [
+    {
+      "decision": "Delhi is the demo city; the network, movement and crowding are all SYNTHETIC and tagged SIMULATED",
+      "rationale": "Owner wants an Indian city. Verified that no Indian transit agency publishes machine-readable occupancy, and the Delhi GTFS file host (traffickarma.iiitd.edu.in:9010) was unreachable. Owner explicitly chose synthetic over waiting for real data.",
+      "locked": true
+    },
+    {
+      "decision": "Boston/MBTA removed from every shipped artifact; only the fitted load curve survives, with no Boston identifiers",
+      "rationale": "Owner instruction: 'no connection to Boston whatsoever otherwise'. config/calibration/mbta_v1.json was deleted and replaced by delhi_v1.json.",
+      "locked": true
+    },
+    {
+      "decision": "Simulator demand scale set so a midday bus runs standing-room and peak reaches crush",
+      "rationale": "The first run inherited the source corpus's uncrowded distribution (85% many-seats), which is wrong for Delhi's reported ~88% load factor. base_boardings raised to 16.0. Marked ASSUMPTION.",
+      "locked": false
+    },
+    {
+      "decision": "settings.toml database DSN aligned to host port 15432",
+      "rationale": "Resolves the long-standing documented mismatch; the compose file has always published 15432 because another container owns 5432.",
+      "locked": false
+    },
+    {
+      "decision": "Delegation to agy/Antigravity abandoned for this repo",
+      "rationale": "Two delegations failed with 'timeout waiting for response'; the repo sits on a Windows mount reached over the WSL 9p bridge at 20s+ per file read, which inverts the break-even. A third attempt was not made.",
+      "locked": true
+    }
+  ],
+  "errors_encountered": [
+    {
+      "error": "Occupancy was decoded from the feed and then silently dropped: the worker only handled snapshot.positions, so every API response returned occupancy_class UNKNOWN despite ~61-78% real coverage",
+      "resolved": true,
+      "resolution": "Added LatestOccupancyState, wired the worker to persist occupancy to Redis and Postgres, and joined it in the API. Verified live: a vehicle returned STANDING_ROOM_ONLY with ratio 0.61."
+    },
+    {
+      "error": "First calibration silently reported default values as measurements - every unmeasured hour came back as 1.0, indistinguishable from a measured average",
+      "resolved": true,
+      "resolution": "Unmeasured hours now return null, a crowding-incidence proxy replaced mean ordinal, and a fit_warnings field records that the corpus spans only 1.6 days and that 7/24 weekday hours were fittable."
+    },
+    {
+      "error": "Every schedule endpoint returned 503 for the process lifetime because the connection pool gave up after 5 seconds, which is shorter than the WSL to Docker hop",
+      "resolved": true,
+      "resolution": "Pool timeout raised to 30s in api/deps.py."
+    },
+    {
+      "error": "The /v1/admin/hotspots query did not return within five minutes: a CTE using trip_id IN (SELECT DISTINCT trip_id FROM win) produced a pathological plan",
+      "resolved": true,
+      "resolution": "Replaced with two simple queries and a dictionary join in Python, plus indexes on stop_time (feed_version_id, arrival_seconds) and (feed_version_id, trip_id). Now returns in well under a second."
+    },
+    {
+      "error": "agy wrote test fixtures missing the required confidence field and with imports placed mid-file",
+      "resolved": true,
+      "resolution": "Fixed by hand; 111 tests pass. The rejected-position test was mutation-verified by inverting the source filter and confirming it goes red."
+    }
+  ],
+  "next_action": "Two things remain for feature-complete: (1) conductor mode - migration 005 for app_user and conductor_shift, POST /v1/auth/login and the shift lifecycle endpoints per SOLUTION.md section 12.5; (2) an actually trained model - run the simulator long enough to accumulate occupancy_observation history, then fit models/baseline.py on it with the chronological split so the forecast is learned from history rather than sampled from the demand model. Metrics from that fit are simulator performance and must never be quoted as real-world accuracy (section 6.5)."
+}

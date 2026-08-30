@@ -19,7 +19,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import AwareDatetime, BaseModel, ConfigDict, Field
 
 from ..contracts.events import OccupancyClass, VehiclePositionEvent, VehicleStopStatus
 from ..contracts.provenance import SourceType
@@ -153,3 +153,236 @@ class HealthResponse(BaseModel):
     redis: bool
     vehicles_tracked: int
     feed_version_id: int | None = None
+
+
+class CrowdBand(BaseModel):
+    """A crowd prediction as a band, never a point (section 12.4 rule 2)."""
+
+    # `model_version` is required by section 12.4 rule 1; pydantic reserves the
+    # `model_` prefix, so the namespace guard is opened deliberately here.
+    model_config = ConfigDict(frozen=True, protected_namespaces=())
+
+    p10_class: OccupancyClass
+    p50_class: OccupancyClass
+    p90_class: OccupancyClass
+    p10_onboard: int | None
+    p50_onboard: int | None
+    p90_onboard: int | None
+    p50_ratio: float | None
+    capacity: int | None
+    model_version: str
+    is_fallback: bool = False
+
+
+class StopForecast(BaseModel):
+    """Predicted crowd when the vehicle reaches one upcoming stop."""
+
+    model_config = ConfigDict(frozen=True)
+
+    stop_id: str
+    stop_name: str
+    stop_sequence: int
+    scheduled_arrival: datetime
+    crowd: CrowdBand
+
+
+class TripForecastResponse(BaseModel):
+    """GET /v1/trips/{tripId}/forecast (section 12.1)."""
+
+    model_config = ConfigDict(frozen=True, protected_namespaces=())
+
+    generated_at: datetime
+    city_id: str
+    trip_id: str
+    route_id: str | None
+    model_version: str
+    stops: list[StopForecast]
+
+
+class JourneyLeg(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    route_id: str
+    route_name: str | None
+    board_stop_id: str
+    board_stop_name: str
+    alight_stop_id: str
+    alight_stop_name: str
+    departure: datetime
+    arrival: datetime
+    stops: int
+    crowd: CrowdBand
+
+
+class JourneyOption(BaseModel):
+    """One ranked itinerary. `reasons` is mandatory (section 21)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    option_id: str
+    total_minutes: int
+    transfers: int
+    departure: datetime
+    arrival: datetime
+    legs: list[JourneyLeg]
+    score: float
+    reasons: list[str]
+    is_recommended: bool = False
+
+
+class PlanResponse(BaseModel):
+    """GET /v1/plan (section 29.1)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    generated_at: datetime
+    city_id: str
+    profile: str
+    options: list[JourneyOption]
+
+
+class HotspotView(BaseModel):
+    """One predicted crowding hotspot, with its lead time."""
+
+    model_config = ConfigDict(frozen=True)
+
+    stop_id: str
+    stop_name: str
+    route_id: str
+    route_short_name: str | None
+    predicted_at: datetime
+    lead_time_min: int
+    services_in_window: int
+    severity: int
+    crowd: CrowdBand
+    reason: str
+
+
+class HotspotsResponse(BaseModel):
+    """GET /v1/admin/hotspots (section 12.2)."""
+
+    model_config = ConfigDict(frozen=True, protected_namespaces=())
+
+    generated_at: datetime
+    city_id: str
+    horizon_min: int
+    model_version: str
+    count: int
+    hotspots: list[HotspotView]
+
+
+class RouteHourForecast(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    hour: int
+    crowd: CrowdBand
+
+
+class RouteForecastResponse(BaseModel):
+    """GET /v1/admin/routes/{id}/forecast (section 12.2)."""
+
+    model_config = ConfigDict(frozen=True, protected_namespaces=())
+
+    generated_at: datetime
+    city_id: str
+    route_id: str
+    model_version: str
+    hours: list[RouteHourForecast]
+
+
+class DataHealthResponse(BaseModel):
+    """GET /v1/admin/data-health (section 12.2)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    generated_at: datetime
+    city_id: str
+    database: bool
+    redis: bool
+    feed_version_id: int | None
+    vehicles_tracked: int
+    vehicles_stale: int
+    vehicles_with_occupancy: int
+    occupancy_coverage: float
+    oldest_position_age_s: int
+    source_types: dict[str, int]
+    forecast_model: str | None
+
+
+class LoginRequest(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    username: str = Field(min_length=1, max_length=128)
+    password: str = Field(min_length=1, max_length=1024)
+
+
+class LoginResponse(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    access_token: str
+    role: str
+    expires_in: int = Field(gt=0)
+
+
+class ShiftStartRequest(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    vehicle_id: str = Field(min_length=1, max_length=128)
+    trip_id: str | None = Field(default=None, max_length=256)
+    route_id: str | None = Field(default=None, max_length=128)
+    device_id: str = Field(min_length=1, max_length=256)
+
+
+class ShiftStartResponse(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    shift_id: int
+    started_at: datetime
+
+
+class ShiftPositionRequest(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    lat: float = Field(ge=-90.0, le=90.0)
+    lon: float = Field(ge=-180.0, le=180.0)
+    accuracy_m: float = Field(ge=0.0, le=500.0)
+    speed_mps: float | None = Field(default=None, ge=0.0)
+    timestamp: AwareDatetime
+
+
+class OccupancyReportRequest(BaseModel):
+    model_config = ConfigDict(frozen=True)
+
+    trip_id: str | None = Field(default=None, max_length=256)
+    vehicle_id: str = Field(min_length=1, max_length=128)
+    occupancy_class: OccupancyClass
+    reported_at: AwareDatetime
+
+
+class StopPoint(BaseModel):
+    """One stop on a trip's path, with the coordinates a client draws."""
+
+    model_config = ConfigDict(frozen=True)
+
+    stop_id: str
+    name: str
+    lat: float
+    lon: float
+    stop_sequence: int
+    scheduled_arrival: datetime | None = None
+
+
+class TripDetailResponse(BaseModel):
+    """GET /v1/trips/{tripId} (section 29.6)."""
+
+    model_config = ConfigDict(frozen=True)
+
+    generated_at: datetime
+    city_id: str
+    trip_id: str
+    route_id: str | None
+    route_name: str | None
+    direction_id: int | None
+    origin: StopPoint
+    destination: StopPoint
+    stops: list[StopPoint]

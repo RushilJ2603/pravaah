@@ -1,280 +1,192 @@
 # FRONTEND HANDOFF — PRAVAAH
 
-**For:** the frontend team
-**From:** backend
-**Date:** 2026-08-30
-**Status of this document:** authoritative for the client/server boundary. Where it disagrees
-with `docs/SOLUTION.md`, SOLUTION.md wins and this file is the bug.
+**For:** the frontend team · **From:** backend · **2026-08-30 (rev 4 — MVP)**
+
+The city is **Delhi**. `city_id` is `"delhi"` everywhere. There is no other city in the API.
+
+Every response below was **captured from the running server**, not written by hand.
 
 ---
 
-## 1. Who builds what
+## 1. Run it
 
-| Piece | Owner | Tech |
-|---|---|---|
-| Passenger + conductor app | Frontend team | Flutter (Android), MapLibre Native |
-| Operator dashboard | Frontend team | React 18 + TypeScript + Vite, MapLibre GL JS |
-| HTTP API, live state, ingestion, forecasting, routing | Backend (me) | FastAPI, Redis, TimescaleDB/PostGIS |
-| Basemap tiles + APK hosting | Backend (me) | Caddy on the deploy VM |
+```bash
+docker compose up -d                            # Postgres + Redis
+cd src
+python -m pravaah.sim.generate --interval 5     # Delhi vehicles into live state
+python -m uvicorn pravaah.api.main:app --port 8000
+```
 
-**Two clients, one API.** The operator dashboard is a web app because a control room runs on a
-desktop browser and a large screen. Passenger and conductor are one Flutter app with a role
-switch in the profile tab — one thing to install for the demo, not three.
+- Base URL: `http://localhost:8000`
+- Interactive docs: `/docs` · OpenAPI schema: `/openapi.json`
+- **Generate your client from `/openapi.json`.** Don't hand-write models.
+  `openapi-generator` for Dart, `openapi-typescript` for the dashboard.
 
-**The clients hold no business logic.** They render what the API returns. They never compute a
-crowd level, a forecast, a ranking or an ETA locally. If you find yourself deriving one of those
-on the device, that is a backend gap — tell me, don't patch around it.
+Map default viewport — Delhi bounds, but read them from the API rather than hardcoding:
+`min_lat 28.35, max_lat 28.90, min_lon 76.80, max_lon 77.45` (centre ≈ 28.63, 77.21).
 
 ---
 
-## 2. What the API actually gives you today
-
-Base path is `/v1`. Everything below is live and tested. Interactive docs at `/docs`,
-machine-readable schema at `/openapi.json`.
+## 2. Working endpoints
 
 ### `GET /v1/vehicles?bbox=minLat,minLon,maxLat,maxLon&limit=500`
 
-`bbox` is **required** — there is no "fetch the whole fleet" call, by design. `limit` defaults to
-500 and is capped server-side.
+`bbox` is **required** — there is no fetch-everything call. `limit` caps at 2000.
 
 ```json
 {
-  "generated_at": "2026-08-30T11:47:30Z",
-  "city_id": "mbta",
+  "generated_at": "2026-08-30T07:31:13.972547Z",
+  "city_id": "delhi",
   "count": 2,
-  "vehicles": [{
-    "vehicle_id": "y2075",
-    "trip_id": "76789790", "route_id": "64", "direction_id": 0,
-    "lat": 42.3601, "lon": -71.0589,
-    "bearing": 135.0, "speed_mps": null,
-    "stop_id": "1234", "current_status": "IN_TRANSIT_TO",
-    "occupancy_class": "UNKNOWN", "occupancy_ratio": null,
-    "ts": "2026-08-30T11:47:12Z", "age_s": 18, "is_stale": false,
-    "source_type": "PUBLIC_FEED", "quality_score": 0.96
-  }]
+  "vehicles": [
+    {
+      "vehicle_id": "DL0181",
+      "trip_id": "DL429-1788073784",
+      "route_id": "DL429",
+      "direction_id": 1,
+      "lat": 28.633284,
+      "lon": 77.123581,
+      "bearing": 102.8,
+      "speed_mps": null,
+      "stop_id": "DLS0290204",
+      "current_status": "IN_TRANSIT_TO",
+      "occupancy_class": "STANDING_ROOM_ONLY",
+      "occupancy_ratio": 0.61,
+      "ts": "2026-08-30T07:29:24.013941Z",
+      "age_s": 109,
+      "is_stale": false,
+      "source_type": "SIMULATED",
+      "quality_score": 1.0
+    }
+  ]
 }
 ```
 
 ### `GET /v1/vehicles/{vehicle_id}`
-Same `vehicle` object, wrapped as `{generated_at, city_id, vehicle}`. `404` if there is no live
-state for that id.
 
-### `GET /v1/stops/{stop_id}/departures`
 ```json
 {
-  "generated_at": "...", "city_id": "mbta", "stop_id": "1234",
-  "stop_name": "Nubian Station", "feed_version_id": 5,
-  "departures": [{
-    "trip_id": "76789790", "route_id": "64", "direction_id": 0,
-    "scheduled_departure": "2026-08-30T11:52:00Z", "headsign": "Oak Square",
-    "crowd_class": "UNKNOWN", "crowd_p50": null, "is_forecast": false
-  }]
+  "generated_at": "2026-08-30T07:31:14.041414Z",
+  "city_id": "delhi",
+  "vehicle": { "...same shape as the objects above..." }
 }
 ```
 
+`404` with the error shape when there is no live state for that id.
+
 ### `GET /v1/health`
-`{status, city_id, generated_at, database, redis, vehicles_tracked, feed_version_id}`.
-Use it for a dev-mode connectivity banner. Do not ship it in a passenger UI.
+
+```json
+{"status":"degraded","city_id":"delhi","generated_at":"2026-08-30T07:30:59.217153Z",
+ "database":false,"redis":true,"vehicles_tracked":300,"feed_version_id":null}
+```
+
+Dev banner only — never ship this in a passenger UI. `status` is `"degraded"` when a
+dependency is down; the map still works on Redis alone.
 
 ### Error shape — the only one, everywhere
+
 ```json
 {"error": {"code": "FEED_UNAVAILABLE", "message": "...", "request_id": "..."}}
 ```
-Codes today: `NO_ROUTE_FOUND`, `INVALID_COORDINATES`, `OUT_OF_SERVICE_AREA`, `FEED_UNAVAILABLE`,
-`RATE_LIMITED`, `INTERNAL`. `SHIFT_NOT_ACTIVE` and `VEHICLE_ALREADY_CLAIMED` arrive with the
-conductor endpoints. Handle unknown codes generically — the list grows.
 
-### Enum values — hardcode nothing else
-
-- `occupancy_class` / `crowd_class`: `EMPTY`, `MANY_SEATS_AVAILABLE`, `FEW_SEATS_AVAILABLE`,
-  `STANDING_ROOM_ONLY`, `CRUSHED_STANDING_ROOM_ONLY`, `FULL`, `NOT_ACCEPTING_PASSENGERS`,
-  `UNKNOWN`
-- `current_status`: `INCOMING_AT`, `STOPPED_AT`, `IN_TRANSIT_TO`
-- `source_type`: `REAL_OPERATOR`, `PUBLIC_FEED`, `APC`, `AFC`, `CROWDSOURCED`, `DERIVED`,
-  `SIMULATED`
+Codes: `NO_ROUTE_FOUND`, `INVALID_COORDINATES`, `OUT_OF_SERVICE_AREA`, `FEED_UNAVAILABLE`,
+`RATE_LIMITED`, `INTERNAL`. Handle unknown codes generically — the list grows.
 
 ---
 
-## 3. Three things about today's data that will confuse you if I don't say them
+## 3. Enums — the complete set, hardcode nothing else
 
-**1. `occupancy_class` is currently `"UNKNOWN"` for every vehicle.** The live feed does carry
-occupancy for about 61% of vehicles, but it is not yet plumbed from ingestion through to the
-live-state store, so the API cannot return it. **This is a known backend gap and I am fixing it.**
-Until then your map will be entirely "unknown" grey. That is not your bug — and it is a good
-forcing function, because the unknown state is the one everybody forgets to design.
+| Field | Values |
+|---|---|
+| `occupancy_class` | `EMPTY`, `MANY_SEATS_AVAILABLE`, `FEW_SEATS_AVAILABLE`, `STANDING_ROOM_ONLY`, `CRUSHED_STANDING_ROOM_ONLY`, `FULL`, `NOT_ACCEPTING_PASSENGERS`, `UNKNOWN` |
+| `current_status` | `INCOMING_AT`, `STOPPED_AT`, `IN_TRANSIT_TO` |
+| `source_type` | `SIMULATED` (everything today), plus `REAL_OPERATOR`, `PUBLIC_FEED`, `APC`, `AFC`, `CROWDSOURCED`, `DERIVED` |
 
-**2. `speed_mps` is deliberately `null`.** The raw feed's speed field had under 10% coverage, so
-it is prohibited. A derived speed replaces it later. Do not display a speed until it is non-null.
+**Design all eight occupancy classes.** Delhi runs standing-room and crush routinely — a
+300-bus fleet at midday sits around 47% few-seats, 30% many-seats, 22% standing, with crush
+appearing at peak hours. This is not a system where "empty" is the common case.
 
-**3. `crowd_p50` is `null` and `is_forecast` is `false` on every departure.** There is no
-forecasting model yet. When it lands you will get a p10/p50/p90 band, not a single number.
+`occupancy_ratio` is a 0–1 load fraction against crush capacity (100 passengers). It is an
+ordinal position rendered as a fraction so you can draw a bar — not a measured load factor.
 
 ---
 
-## 4. What is coming, and what to stub
+## 4. What the data is — and what you must say on screen
 
-Build against the shapes; do not wait for the implementations.
+**Every vehicle carries `source_type: "SIMULATED"`. All of it is synthetic.**
 
-| Endpoint | Gives you | Status |
-|---|---|---|
-| `GET /v1/trips/{id}/forecast` | Crowd + ETA per upcoming stop, as p10/p50/p90 | after forecasting lands |
-| `GET /v1/plan` | Ranked itineraries with reason codes | after routing lands |
-| `POST /v1/occupancy/report` | Passenger crowd report | spec'd, not built |
-| `GET/WS /v1/journeys/{id}/stream` | Live re-scoring of an active journey | spec'd, not built |
-| `POST /v1/auth/login`, `/v1/shifts/*` | Conductor login + shift lifecycle | spec'd, not built |
-| `GET /v1/admin/hotspots`, `/admin/routes/{id}/forecast`, `/admin/data-health` | Operator dashboard data | spec'd, not built |
+- **The network is synthetic**, built over **real Delhi places at real coordinates** —
+  Kashmere Gate ISBT, Connaught Place, Nehru Place, Dwarka, Anand Vihar, Azadpur and ~55
+  more. Distances between named stops are real distances. Stop ids beginning `DLN` are real
+  named places; `DLS` are generated intermediate stops along the corridor.
+- **Crowding comes from a behavioural model** — passengers board and alight stop by stop,
+  occupancy is the running sum, and it is clipped at Delhi crush capacity. It is not a random
+  percentage, and it is conserved: everyone who boards alights by the terminus.
+- **One borrowed quantity**: the load-along-the-run curve, fitted from a real recorded transit
+  corpus. No place, route, identifier or crowding level from that corpus appears anywhere in
+  this project. Delhi capacity, peak windows and demand scale are Delhi assumptions.
 
-Exact request/response JSON for all of these is in `docs/SOLUTION.md` §29. **Those shapes are
-contractual** — if you build to them, integration is a base-URL change.
-
-**Do not hand-write models.** Generate them from `/openapi.json` (`openapi-generator` for Dart,
-`openapi-typescript` for the dashboard) and regenerate when I tell you the schema moved. This is
-how we stop the client and server drifting.
+**This makes rule 6 below the most important thing on your screen.** A persistent, unmissable
+"simulated data" treatment — a banner plus per-vehicle marking. If someone can screenshot your
+map and pass it off as live Delhi data, the treatment is wrong.
 
 ---
 
 ## 5. The six data-state rules — binding, not styling
 
-These come from `docs/SOLUTION.md` §33.3. Each one has an acceptance gate. Violating one is a
-correctness defect, not a design opinion. They apply to **both** clients.
+Each has an acceptance gate. Breaking one is a correctness defect, not a design opinion.
 
-1. **Unknown is never empty.** A missing occupancy renders as "Unknown" in a neutral style. Never
-   as 0%, never as an empty vehicle, never in the same colour as a genuinely empty one. About 31%
-   of real rows have no occupancy — if unknown looks empty, the app confidently tells people to
-   board a bus it knows nothing about. This is the single most damaging bug this product can ship.
-2. **Uncertainty is always visible.** Any forecast shown as a number carries its p10–p90 band. A
-   bare point estimate is a defect.
-3. **Every ranked option shows its reason.** Reason codes come from the API. The client never
-   invents an explanation.
-4. **Stale data is labelled.** Use `is_stale` and `age_s` — both are always present so you never
-   compute clock skew yourself. When stale, show a "live tracking delayed" badge rather than
-   silently drawing an old position.
+1. **Unknown is never empty.** Missing occupancy renders as "Unknown" in a neutral style —
+   never 0%, never an empty bus, never the same colour as a genuinely empty one. Confidently
+   telling someone to board a bus you know nothing about is the worst bug this product ships.
+2. **Uncertainty is always visible.** Any forecast shown as a number carries its p10–p90 band.
+3. **Every ranked option shows its reason.** Reason codes come from the API; never invent one.
+4. **Stale data is labelled.** Use `is_stale` and `age_s` — both always present, so you never
+   compute clock skew. Show a "live tracking delayed" badge rather than drawing an old position.
 5. **Fallbacks are disclosed.** `is_fallback: true` renders as "estimated from history".
-6. **Simulated data is marked.** Anything with `source_type: "SIMULATED"` is visibly tagged and
-   never presented as operator data.
+6. **Simulated data is marked.** See §4. Today this is everything.
 
-Plus, from §33.5: **crowding is never conveyed by colour alone.** Every crowd level carries a text
-label. Red/green is the exact pairing most affected by colour blindness, and this is a public
-transit app.
+Plus: **crowding is never conveyed by colour alone.** Every level carries a text label —
+red/green is the pairing most affected by colour blindness, and this is a public transit app.
 
 ---
 
 ## 6. Navigation
 
-**Passenger — four tabs**
+**Passenger app (Flutter) — four tabs:** Home (search, nearby buses, saved stops) · Journey
+(planner, becoming the live trip tracker once started) · Alerts & Saved · Profile.
 
-| Tab | Contents |
+**Operator dashboard (React web) — four views** in a persistent side nav, designed for 1440px
+and wider: Fleet Command · Predicted Hotspots · Route Diagnostics · System Health.
+
+---
+
+## 7. Not in the MVP — future work
+
+These are the honest answer to "where does real data come from?" — future improvements for
+pulling real and reliable data:
+
+| | Why it is deferred |
 |---|---|
-| Home | "Where to?" search, nearby vehicles, saved stops, recent destinations |
-| Journey | Planning mode (origin/destination, four preference profiles, ranked options with reasons). Becomes the live journey tracker once a trip starts. |
-| Alerts & Saved | Saved routes available offline, disruptions, commute alerts |
-| Profile | Accessibility settings, theme, role switch |
+| `GET /v1/stops/{id}/departures` | Needs the network persisted to Postgres; the MVP network lives in the simulator only |
+| `GET /v1/trips/{id}/forecast` | Baseline crowd model is written but not yet wired to an endpoint |
+| `GET /v1/plan` — journey ranking | Routing engine not built |
+| Conductor app, login, shift tracking | The path to real Delhi occupancy data; specified, not built |
+| Operator `/v1/admin/*` endpoints | Specified, not built |
+| Real Delhi GTFS + live vehicle feed | Official file host was unreachable today; download is form-gated |
 
-**Conductor — one screen.** Shift start (pick route + service), four large high-contrast crowd
-buttons, shift end. Usable one-handed, in sunlight, by someone who is also doing their actual job.
-No operator role in the mobile app.
-
-**Operator — web, four views** in a persistent side nav (desktop layout, not tabs): Fleet Command,
-Predicted Hotspots, Route Diagnostics, System Health. Design for 1440px and wider; it does not
-need to be phone-responsive. The operator's entire value is **lead time** — a hotspot without a
-lead time is just a report of something already going wrong, which is the status quo we exist to
-beat.
+Contracts for all of these are in `docs/SOLUTION.md` §29 and are stable — build against them
+and integration becomes a base-URL change.
 
 ---
 
-## 7. Auth
+## 8. Rules of engagement
 
-| Role | Access |
-|---|---|
-| Passenger | Anonymous. No login, no account, no credentials in the build. |
-| Conductor | Signs in. May write position + occupancy **for their own active shift only**. |
-| Operator | Signs in. Read-only across the fleet, plus scenario endpoints. |
-
-Short-lived bearer tokens, sent as `Authorization: Bearer <token>`. Credentials are issued out of
-band — **there is no public sign-up screen, do not build one.**
-
-A conductor position report is only accepted while a shift is active. The shift is what binds a
-phone to a vehicle and a trip; without it a GPS point cannot be joined to the network and is
-useless. Starting a shift on a vehicle that already has one fails with `VEHICLE_ALREADY_CLAIMED`
-— surface that clearly, it is the "two crew members opened the app" case.
-
-Background location is requested **only** for an active shift, disclosed in-app, and stops when
-the shift ends.
-
----
-
-## 8. Map and basemap
-
-- **No proprietary tile key, ever.** The basemap is a self-hosted Protomaps `.pmtiles` extract
-  served from our VM, and it must work with networking disabled — the demo has to run offline.
-  I will give you the URL and the file.
-- Both clients use MapLibre (Native on Flutter, GL JS on web) against that same tile source.
-- **Always request by viewport bbox.** Never try to fetch the whole fleet; the endpoint will
-  refuse.
-- Animate markers between updates rather than letting them jump. Polling is roughly every 15–20 s,
-  so without interpolation the buses teleport.
-- Streaming runs only while a live screen is foregrounded, and stops when the app is backgrounded.
-  Continuous polling from a mobile client is a defect — it holds the radio awake and eats battery.
-
----
-
-## 9. Which city, and what the data is
-
-**The demo runs on Boston (MBTA).** `city_id` is `"mbta"`. Coordinates are Boston-area, route ids
-look like `"64"`, `"Red"`, `"Green-B"`. Set your default map viewport to Boston, and read the city
-and its bounds from the API rather than hardcoding either.
-
-**Delhi is the deployment target**, and its city profile exists, but it is not integrated and its
-feed publishes no occupancy at all. Do not build anything Delhi-specific.
-
-**Never hardcode a city name in client code.** The city comes from the API and the city profile —
-same rule the backend follows.
-
-What is real, so you label it honestly:
-- Vehicle positions and occupancy: **real**, from the MBTA public feed (`PUBLIC_FEED` /
-  `REAL_OPERATOR`), recorded continuously since 2026-08-28.
-- Routes, stops, timetables: **real** MBTA static GTFS — 399 routes, 9,630 stops, 2.2M stop-times.
-- Forecasts: will be **real model output** trained on the recorded corpus, tagged `DERIVED`.
-- Conductor reports during a demo, with no real crew on board: **simulated**, tagged `SIMULATED`,
-  and rule 6 says you must show that.
-
----
-
-## 10. Environments
-
-| | Base URL |
-|---|---|
-| Local | `http://localhost:8000` (`uvicorn pravaah.api.main:app --reload`) |
-| Deployed | HTTPS on the demo VM — URL to follow |
-
-TLS is mandatory in deployment because Android blocks cleartext HTTP by default. CORS is currently
-allowed only for `http://localhost:5173` (the Vite dev server) — tell me if the dashboard dev
-server runs anywhere else. Flutter is a native client and is unaffected by CORS.
-
----
-
-## 11. How to change the contract
-
-`docs/SOLUTION.md` is binding: code is written to match it, and a change that diverges from it is
-a defect even if it works. So if you need a field that isn't there, a different shape, or a new
-endpoint — **ask, don't work around it.** I amend the document first, then implement. Turnaround
-is fast; silent client-side workarounds are what we're avoiding, because they hide missing
-backend capability until demo day.
-
----
-
-## 12. What I need back from you
-
-1. **Flutter and Android SDK are not installed here.** Confirm your team has a working toolchain
-   and a physical device or emulator for the demo — this is the first thing that can silently
-   block A.4.
-2. **Confirm the four passenger tabs and the four operator views**, or send changes now, while
-   changing them is free.
-3. **Which screens do you want stubbed first?** I can prioritise returning realistic shaped data
-   for a screen you are actively building.
-4. **Your dashboard dev-server origin**, so I can widen CORS.
-5. **Anything in §5 you think you cannot honour.** Those six rules are gates — if one is going to
-   be a problem, I need to know before it fails at review, not after.
-
-Ping me on anything ambiguous here. An assumption written into the client is much more expensive
-to unwind than a question.
+- **Don't work around a missing field.** If you need something that isn't there, ask — I amend
+  the spec and implement it. Silent client-side workarounds hide missing backend capability
+  until demo day.
+- **The client holds no business logic.** It renders what the API returns and never computes a
+  crowd level, forecast, ranking or ETA locally.
+- CORS currently allows `http://localhost:5173` only — tell me your dev-server origin.
+  Flutter is native and unaffected by CORS.

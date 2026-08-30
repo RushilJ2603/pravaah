@@ -44,6 +44,41 @@ connection from the host, and by reading pytest's summary line rather than its e
 
 ---
 
+## [2026-08-30] — Aggregating hotspots with a correlated CTE over stop_time
+**What was tried:** `/v1/admin/hotspots` computed each stop's position along its trip with
+`WITH tot AS (SELECT trip_id, max(stop_sequence) ... WHERE trip_id IN (SELECT DISTINCT trip_id FROM win))`.
+**Why rejected:** The planner chose a plan that **did not return within five minutes** on only
+113,568 stop_times. The window CTE alone runs in 0.02 s, so the cost is entirely in the
+`IN (SELECT DISTINCT ...)` correlation. Replaced with two independent queries and a dictionary
+join in Python, which returns in milliseconds.
+**If user brings it up again:** Do not reintroduce the correlated subquery "for tidiness". Two
+cheap queries plus a Python join is the working shape here.
+
+---
+
+## [2026-08-30] — Delegating file-heavy work to agy/Antigravity in this repo
+**What was tried:** Two delegations (`--tier pro`, 10 min then 25 min timeouts) to generate the
+occupancy test suite and to amend documentation.
+**Why rejected:** Both died with `timeout waiting for response`, byte-identical despite raising
+the budget — so it is not task size. The repo lives on `/mnt/c/...`, a Windows mount reached over
+the WSL 9p bridge where the wrapper itself warns reads cost 20s+ each. That inverts the
+break-even for anything needing several file reads. The one delegation that did complete (doc
+amendments) returned work with a false change-log entry, a duplicated table row, and three
+Markdown tables missing header separators — all of which had to be fixed by hand.
+**If user brings it up again:** The fix is environmental, not prompt-level — clone into the Linux
+filesystem under `~` and point `--dir` there. Until then, write it directly.
+
+---
+
+## [2026-08-30] — `pkill -f uvicorn` to restart the API
+**What was tried:** `pkill -f "uvicorn pravaah"` before relaunching the server.
+**Why rejected:** The pattern matches the agent's own Bash tool invocation, so it kills the
+running shell and returns exit code 144 with the restart never happening.
+**If user brings it up again:** Start the new server on a different port, or match on the exact
+PID rather than the command line.
+
+---
+
 ## Template Entry — Replace This
 **What was tried:** Using approach X for problem Y  
 **Why rejected:** Caused Z issue — specifically, [exact error or failure mode]  

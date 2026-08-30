@@ -1,144 +1,106 @@
 {
   "_schema": "ai-context-bridge/session-v1",
   "_note": "Auto-generated at session end. Do not edit manually. Before regenerating, the AI must archive the previous version of this file to .context/sessions/<generated_at-ISO>.json so machine-readable history is preserved. Commit with CHANGELOG.md, PROJECT_STATE.md, and SESSION_LOG.md.",
-  "generated_at": "2026-08-30T09:45:00+05:30",
-  "session_by": "AI (Claude Opus 5) with Somyak Mohanta",
-  "session_summary": "Bootstrapped context files, made docs/SOLUTION.md the binding spec, completed Slice 0 (P0) and Slice A.1-A.3, pushed to a private GitHub repo",
-  "current_phase": "Slice A - It is alive (A.1-A.3 done, A.4 frontend and A.5 deploy remaining)",
-  "build_state": "Slice 0 complete and gated (contracts, config, migrations, GTFS importer, CSV->Parquet converter). Slice A.1 adapters, A.2 validation + Redis state, A.3 read-only API + ingestion worker all built and gated. 106 unit tests plus integration suites pass, ruff clean. Compose stack running: TimescaleDB+PostGIS on host port 15432, Redis on 6379. MBTA GTFS imported as feed_version_id 5.",
-  "blocking_issue": null,
+  "generated_at": "2026-08-30T15:10:00+05:30",
+  "session_by": "AI (Claude Opus 5) with Somyak Mohanta; conductor mode / auth / model training contributed by Codex",
+  "session_summary": "Codex completed conductor mode, staff auth, the model registry and a genuinely trained baseline; Claude verified the whole build live and produced the demo plan. Backend is feature-complete.",
+  "current_phase": "Backend feature-complete on synthetic Delhi. Remaining work is demo enablement, not features.",
+  "build_state": "14 endpoints across passenger / operator / conductor / auth, all registered and serving. 199 tests pass (124 unit + 75 integration), ruff clean. Trained baseline serving live as 'seasonal_median_v1+simulated'. Compose stack up: TimescaleDB+PostGIS on host port 15432, Redis 6379. Synthetic Delhi network is feed_version_id 6 (490 stops, 51 routes, 8568 trips, 113568 stop_times). Simulated history in the database: 60,958 occupancy_observation and vehicle_position rows spanning 2 days with all 24 hours covered evenly.",
+  "blocking_issue": "No staff accounts exist. app_user has zero rows and provision_user() has no CLI entry point, so POST /v1/auth/login always fails and every /v1/admin/* route returns 401. The operator dashboard and conductor mode are both built, tested and completely unreachable at runtime. This is the single blocker for demoing those two roles.",
   "files_modified_this_session": [
-    "CLAUDE.md",
     "PROJECT_STATE.md",
     "CHANGELOG.md",
     "SESSION_LOG.md",
-    "session_prompts.md",
-    ".gitignore",
     ".context/session.json",
     ".context/dead_ends.md",
     "docs/SOLUTION.md",
+    "docs/FRONTEND_HANDOFF.md",
     "config/settings.toml",
-    "config/cities/mbta.toml",
     "config/cities/delhi.toml",
-    "migrations/001_extensions.sql",
-    "migrations/002_static_gtfs.sql",
-    "migrations/003_telemetry.sql",
-    "migrations/004_predictions.sql",
-    "docker-compose.yml",
-    "requirements.txt",
-    "requirements-dev.txt",
-    "pyproject.toml",
-    "src/pravaah/config.py",
-    "src/pravaah/contracts/provenance.py",
-    "src/pravaah/contracts/events.py",
-    "src/pravaah/contracts/api.py",
-    "src/pravaah/adapters/base.py",
-    "src/pravaah/adapters/gtfs_rt.py",
-    "src/pravaah/adapters/mbta.py",
-    "src/pravaah/ingest/gtfs_import.py",
-    "src/pravaah/ingest/convert.py",
-    "src/pravaah/ingest/validate.py",
-    "src/pravaah/ingest/worker.py",
-    "src/pravaah/state/redis_state.py",
-    "src/pravaah/api/main.py",
+    "config/calibration/delhi_v1.json",
+    "config/models/crowd_v1.json",
+    "config/models/baseline_v1.json",
+    "migrations/005_auth.sql",
+    "migrations/006_schedule_indexes.sql",
+    "src/pravaah/api/auth.py",
+    "src/pravaah/api/conductor.py",
+    "src/pravaah/api/admin.py",
+    "src/pravaah/api/deps.py",
     "src/pravaah/api/passenger.py",
     "src/pravaah/api/schemas.py",
-    "src/pravaah/api/deps.py",
-    "tests/unit/test_contracts.py",
-    "tests/unit/test_gtfs_import.py",
-    "tests/unit/test_convert.py",
-    "tests/unit/test_adapters.py",
-    "tests/unit/test_validate.py",
+    "src/pravaah/api/main.py",
+    "src/pravaah/contracts/api.py",
+    "src/pravaah/models/baseline.py",
+    "src/pravaah/models/crowd.py",
+    "src/pravaah/models/registry.py",
+    "src/pravaah/sim/calibrate.py",
+    "src/pravaah/sim/network.py",
+    "src/pravaah/sim/demand.py",
+    "src/pravaah/sim/generate.py",
+    "src/pravaah/sim/persist.py",
+    "src/pravaah/state/redis_state.py",
+    "src/pravaah/ingest/worker.py",
     "tests/unit/test_worker.py",
-    "tests/integration/test_gtfs_import_db.py",
-    "tests/integration/test_convert_corpus.py",
-    "tests/integration/test_mbta_live.py",
+    "tests/unit/test_baseline.py",
+    "tests/unit/test_conductor_api.py",
+    "tests/unit/test_model_registry.py",
+    "tests/integration/test_api.py",
     "tests/integration/test_redis_state.py",
-    "tests/integration/test_api.py"
+    "tests/integration/test_conductor_db.py",
+    "tests/integration/test_forecast_admin_api.py",
+    "tests/integration/test_operator_auth.py"
   ],
   "commands_run": [
-    "git init && git add -A && git commit",
-    "docker compose up -d",
-    "python -m pytest tests/unit -q",
-    "PRAVAAH_DATABASE_DSN=postgresql://pravaah:pravaah@localhost:15432/pravaah python -m pytest tests/integration -q",
-    "python -m ruff check --fix src tests",
-    "git filter-branch -f --msg-filter (strip Co-Authored-By trailers)",
-    "gh repo create pravaah --private --source=. --remote=origin",
-    "git push -u origin master"
+    "python -m pytest tests/unit -q  (124 passed)",
+    "python -m pytest tests/integration -q  (75 passed, 9m14s)",
+    "python -m ruff check src tests  (clean)",
+    "python -m pravaah.sim.generate --interval 5 [--persist-history]",
+    "python -m pravaah.sim.persist",
+    "python -m uvicorn pravaah.api.main:app --port 8020"
   ],
   "decisions_made": [
     {
-      "decision": "docs/SOLUTION.md is the binding specification; code follows it and deviations require an approved doc edit first",
-      "rationale": "Owner's standing instruction. A .docx cannot be diffed or reviewed, so the contract moved to version-controlled Markdown (ADR-09). The .docx is frozen unmodified.",
+      "decision": "The trained baseline is the serving model; the Monte Carlo table is its fallback",
+      "rationale": "models/registry.load_serving_forecaster prefers HistoricalBaselineForecaster and degrades to the simulated table for cells with no learned history. Live model_version reads 'seasonal_median_v1+simulated'.",
       "locked": true
     },
     {
-      "decision": "MBTA is the development substrate; Delhi is the deployment target (ADR-08)",
-      "rationale": "Delhi OTD publishes no occupancy and crowd labels are the product. City knowledge is confined to adapters/ and config/cities/ so the swap is configuration.",
+      "decision": "Operator endpoints are gated behind require_operator; conductor writes behind require_conductor",
+      "rationale": "Section 15.3. Unauthenticated write access to live vehicle state was the highest-severity risk in the design.",
       "locked": true
     },
     {
-      "decision": "Section 31 restructured from a strict P0-P7 march into vertical slices",
-      "rationale": "Owner wants a working frontend with live features and a deployment. A bottom-up order leaves nothing visible or deployable until most of the work is done.",
+      "decision": "Model metrics are stamped SIMULATOR_PERFORMANCE_ONLY_NOT_REAL_WORLD_ACCURACY inside the artifact",
+      "rationale": "Section 6.5 forbids quoting synthetic-label metrics as real-world accuracy. Enforcing it in the file rather than in a docstring means it travels with the model.",
       "locked": true
     },
     {
-      "decision": "Deploy to a single VM running the existing Compose stack (section 14.4)",
-      "rationale": "Keeps section 27 unchanged. TimescaleDB is unavailable on most managed free tiers, so a split Vercel/Render deployment would have forced a schema rewrite.",
-      "locked": true
-    },
-    {
-      "decision": "Self-hosted Protomaps .pmtiles basemap",
-      "rationale": "A credible basemap with no API key that also works with networking disabled, so the offline demo requirement in section 19 / F.4 survives.",
-      "locked": true
-    },
-    {
-      "decision": "Stop gate corrected from 10,297 to 9,630 stops with geometry",
-      "rationale": "667 rows are coordinate-less location_type=3 pathway nodes that no trip references, and section 27 declares stop.geom NOT NULL. Both could not hold.",
-      "locked": true
-    },
-    {
-      "decision": "Malformed rows are skipped and counted; conversion fails above 0.1%",
-      "rationale": "A live append-only CSV always ends mid-write, so strict failure is unusable; silent skipping would let a broken capture report success.",
-      "locked": true
-    },
-    {
-      "decision": "GitHub repo is private, and commit messages carry no AI co-author trailer",
-      "rationale": "Owner's explicit instruction. Private keeps the internal deck, architecture document and SIH submission PDF unpublished before judging.",
-      "locked": true
+      "decision": "Demo will be staged around the crowd band at the boarding stop, with a rehearsed disclosure of synthetic data",
+      "rationale": "The forecast-at-your-stop screen is the only thing competitors do not do. Volunteering the synthetic limitation converts the main vulnerability into the conductor cold-start story.",
+      "locked": false
     }
   ],
   "errors_encountered": [
     {
-      "error": "Three record_feed.py processes were appending to the same CSVs concurrently, multiply-recording every observation and interleaving mid-row into torn lines",
+      "error": "PROJECT_STATE.md and session.json written earlier in this session claimed 'NO TRAINED MODEL' and 'conductor mode is not built'. Both became false once Codex's work landed, making the context docs actively misleading rather than merely stale.",
       "resolved": true,
-      "resolution": "Stopped PIDs 52120 and 66296 with the owner's approval; kept PID 39404 so recording never paused. Data recorded after 09:00 on 2026-08-30 is single-sourced."
+      "resolution": "Both rewritten against a live verification pass rather than against memory."
     },
     {
-      "error": "An unrelated postgres:16 container already owned host port 5432. Docker silently declines to publish a taken port, so the stack looked healthy while every client reached the other database and failed authentication",
+      "error": "Misread is_fallback:true in a forecast response as meaning the model had no learned data for that cell",
       "resolved": true,
-      "resolution": "Published the database on host port 15432 instead. Diagnosed by correlating a failed connection against our container's logs, which showed nothing."
+      "resolution": "Measured it: coverage is 100% at the (hour, position) level with zero fallback. The flag means 'answered from a coarser key than route-specific'. 71% of route-hour combinations have learned history; the fully route-and-position-specific level is the sparse one at ~6%."
     },
     {
-      "error": "Torn CSV rows do not always have the wrong column count; one landed with 18 commas but an ingest_ts of ':46.962563', producing a partition directory of that name",
-      "resolved": true,
-      "resolution": "Added _drop_unusable_timestamps requiring an ISO-8601 prefix, counted under the same malformed-row policy."
+      "error": "Operator endpoints returned 401 during smoke testing and login returned 'invalid username or password'",
+      "resolved": false,
+      "resolution": "Root cause identified: app_user is empty and provision_user() has no CLI. NOT yet fixed - this is the recorded blocking issue."
     },
     {
-      "error": "Row accounting was off by exactly 8: pyarrow's schema-sniffing pass invoked the counting handler before the real pass ran",
-      "resolved": true,
-      "resolution": "The sniffing pass now uses a non-counting handler. Caught only because the corpus test asserts the three outcomes partition the input exactly."
-    },
-    {
-      "error": "Several commands reported exit code 0 while tests failed or skipped, because piping to tail masks pytest's status",
-      "resolved": true,
-      "resolution": "Results are read from the pytest summary line, never the exit code. Recorded in .context/dead_ends.md."
-    },
-    {
-      "error": "A PowerShell here-string used inside the Bash tool corrupted the first commit message; large bash heredocs silently failed to parse and wrote nothing",
-      "resolved": true,
-      "resolution": "Amended the commit. File writes now use the editor tool rather than shell heredocs."
+      "error": "Authentication failures serialize as {'code':'INTERNAL'} because ErrorCode has no UNAUTHORIZED or FORBIDDEN member",
+      "resolved": false,
+      "resolution": "Identified, not fixed. A client cannot distinguish 'log in again' from 'server broke'."
     }
   ],
-  "next_action": "Build Slice A.4: the React + Vite + MapLibre live map per SOLUTION.md section 33, using a self-hosted Protomaps .pmtiles basemap for Boston. Gate: vehicles move on the correct routes, a stale feed shows the freshness badge, and an unknown occupancy never renders as empty. Before that, resolve the two skipped tests in tests/integration/test_api.py -- the /v1/stops/{id}/departures endpoint is not yet verified end to end even though GTFS feed_version_id 5 is imported."
+  "next_action": "Demo enablement, in this order: (1) CLOCK CONTROL - the simulator and api/deps.now() both use real time, so only the current hour can ever be demonstrated; a time override plus optional acceleration is what makes 'a normal day' showable, and it is the single highest-value remaining item. (2) Seed staff accounts via a CLI over the existing provision_user(), unblocking operator and conductor. (3) Add UNAUTHORIZED/FORBIDDEN to ErrorCode. (4) One-command demo runner: compose up, persist network, seed users, start simulator, start API, wait for health. (5) Refresh docs/FRONTEND_HANDOFF.md, still at rev 4 documenting 5 of 14 endpoints."
 }

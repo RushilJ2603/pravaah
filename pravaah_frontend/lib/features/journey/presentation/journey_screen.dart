@@ -2,10 +2,11 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:pravaah_api/api.dart';
 import '../../../../theme/app_theme.dart';
-import '../../../core/api_provider.dart';
 import '../../../core/api/places.dart';
+import '../../../core/api/error_helper.dart';
+import '../../../core/api/journey_helpers.dart';
+import '../providers/plan_provider.dart';
 import 'widgets/journey_live_map.dart';
-import 'package:intl/intl.dart';
 
 enum JourneyState { initial, searching, results, active }
 
@@ -18,17 +19,20 @@ class JourneyScreen extends ConsumerStatefulWidget {
 
 class _JourneyScreenState extends ConsumerState<JourneyScreen> {
   JourneyState _currentState = JourneyState.initial;
-  String _selectedPreference = 'Fastest';
+  PlanProfile _selectedProfile = PlanProfile.balanced;
+
+  /// Set once the user searches; the provider owns loading and error state
+  /// from there, so this screen never hand-rolls a spinner again.
+  PlanQuery? _query;
+
+  /// The option the user tapped. The active view draws this exact journey, so
+  /// it has to survive the transition -- it used to be discarded.
+  JourneyOption? _activeOption;
 
   final TextEditingController _originController = TextEditingController();
   final TextEditingController _destController = TextEditingController();
 
-  DelhiPlace? _originPlace;
-  DelhiPlace? _destPlace;
-  PlanResponse? _planResponse;
-  JourneyOption? _selectedOption;
-
-  Future<void> _handleSearch() async {
+  void _handleSearch() {
     if (_originController.text.isEmpty || _destController.text.isEmpty) {
       ScaffoldMessenger.of(context).showSnackBar(
         const SnackBar(content: Text('Please enter an origin and destination.')),
@@ -38,46 +42,33 @@ class _JourneyScreenState extends ConsumerState<JourneyScreen> {
 
     final origin = findPlace(_originController.text);
     final destination = findPlace(_destController.text);
-    
     if (origin == null || destination == null) {
       final unknown = origin == null ? _originController.text : _destController.text;
       ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text('Could not find "$unknown". Try another location.')),
+        SnackBar(content: Text('Could not find "$unknown". Pick a suggestion.')),
+      );
+      return;
+    }
+    if (origin.name == destination.name) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Origin and destination are the same.')),
       );
       return;
     }
 
     setState(() {
-      _currentState = JourneyState.searching;
-      _originPlace = origin;
-      _destPlace = destination;
+      _query = PlanQuery(
+        origin: origin,
+        destination: destination,
+        profile: _selectedProfile,
+      );
+      _currentState = JourneyState.results;
     });
-    
-    try {
-      final api = ref.read(passengerApiProvider);
-      // Convert UI preference to backend expected format (e.g. "Least Crowded" -> "least_crowded")
-      String apiProfile = _selectedPreference.toLowerCase().replaceAll(' ', '_');
-      
-      // Use dynamic coordinates from places.dart
-      final response = await api.planV1PlanGet(origin.lat, origin.lon, destination.lat, destination.lon, profile: apiProfile);
-      
-      if (mounted) {
-        setState(() {
-          _planResponse = response;
-          _currentState = JourneyState.results;
-        });
-      }
-    } catch (e) {
-      if (mounted) {
-         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Search failed: $e')));
-         setState(() => _currentState = JourneyState.initial);
-      }
-    }
   }
 
   void _startJourney(JourneyOption option) {
     setState(() {
-      _selectedOption = option;
+      _activeOption = option;
       _currentState = JourneyState.active;
     });
   }
@@ -85,7 +76,7 @@ class _JourneyScreenState extends ConsumerState<JourneyScreen> {
   void _endJourney() {
     setState(() {
       _currentState = JourneyState.initial;
-      _selectedOption = null;
+      _activeOption = null;
       _originController.clear();
       _destController.clear();
     });
@@ -109,8 +100,10 @@ class _JourneyScreenState extends ConsumerState<JourneyScreen> {
               padding: const EdgeInsets.all(24.0),
               sliver: SliverList(
                 delegate: SliverChildListDelegate([
-                  if (_currentState == JourneyState.active && _selectedOption != null)
-                    _buildActiveMode(_selectedOption!)
+                  if (_currentState == JourneyState.active &&
+                      _query != null &&
+                      _activeOption != null)
+                    _buildActiveMode()
                   else
                     _buildPlanningMode(),
                   const SizedBox(height: 120),
@@ -135,7 +128,7 @@ class _JourneyScreenState extends ConsumerState<JourneyScreen> {
           ),
         ),
         const SizedBox(height: 24),
-        
+
         // Inputs
         Container(
           padding: const EdgeInsets.all(16),
@@ -161,20 +154,21 @@ class _JourneyScreenState extends ConsumerState<JourneyScreen> {
           ),
         ),
         const SizedBox(height: 24),
-        
+
         // Preferences
         Text('Preferences', style: Theme.of(context).textTheme.titleMedium),
         const SizedBox(height: 12),
         Wrap(
           spacing: 8,
           children: [
-            _buildPreferenceChip('Fastest'),
-            _buildPreferenceChip('Least Crowded'),
-            _buildPreferenceChip('Balanced'),
+            _buildPreferenceChip(PlanProfile.fastest),
+            _buildPreferenceChip(PlanProfile.leastCrowded),
+            _buildPreferenceChip(PlanProfile.mostReliable),
+            _buildPreferenceChip(PlanProfile.balanced),
           ],
         ),
         const SizedBox(height: 32),
-        
+
         // Action Button or Results
         if (_currentState == JourneyState.initial)
           SizedBox(
@@ -184,47 +178,17 @@ class _JourneyScreenState extends ConsumerState<JourneyScreen> {
               child: const Text('Search Routes'),
             ),
           )
-        else if (_currentState == JourneyState.searching)
-          const Center(
-            child: Padding(
-              padding: EdgeInsets.all(32.0),
-              child: CircularProgressIndicator(color: AppTheme.primaryBlue),
-            ),
-          )
-        else if (_currentState == JourneyState.results && _planResponse != null) ...[
-          Text('Suggested Routes', style: Theme.of(context).textTheme.titleLarge),
-          const SizedBox(height: 16),
-          
-          ...() {
-            final sorted = List<JourneyOption>.from(_planResponse!.options);
-            if (_selectedPreference == 'Fastest') {
-              sorted.sort((a, b) => a.totalMinutes.compareTo(b.totalMinutes));
-            } else if (_selectedPreference == 'Least Crowded') {
-              sorted.sort((a, b) {
-                final aRatio = a.legs.isNotEmpty ? (a.legs.first.crowd?.p50Ratio?.toDouble() ?? 1.0) : 1.0;
-                final bRatio = b.legs.isNotEmpty ? (b.legs.first.crowd?.p50Ratio?.toDouble() ?? 1.0) : 1.0;
-                return aRatio.compareTo(bRatio);
-              });
-            } else { // Balanced: blend of time and crowd
-              sorted.sort((a, b) {
-                final aRatio = a.legs.isNotEmpty ? (a.legs.first.crowd?.p50Ratio?.toDouble() ?? 1.0) : 1.0;
-                final bRatio = b.legs.isNotEmpty ? (b.legs.first.crowd?.p50Ratio?.toDouble() ?? 1.0) : 1.0;
-                final aScore = a.totalMinutes * 0.6 + aRatio * 100 * 0.4;
-                final bScore = b.totalMinutes * 0.6 + bRatio * 100 * 0.4;
-                return aScore.compareTo(bScore);
-              });
-            }
-            return sorted.asMap().entries.map((entry) {
-              return _buildRankedOption(entry.value, entry.key == 0);
-            });
-          }(),
-
+        else if (_currentState == JourneyState.results) ...[
+          _buildResults(),
           const SizedBox(height: 16),
           SizedBox(
             width: double.infinity,
             child: OutlinedButton(
               onPressed: () {
-                setState(() => _currentState = JourneyState.initial);
+                setState(() {
+                  _currentState = JourneyState.initial;
+                  _query = null;
+                });
               },
               child: const Text('Clear Search'),
             ),
@@ -234,17 +198,285 @@ class _JourneyScreenState extends ConsumerState<JourneyScreen> {
     );
   }
 
-  Widget _buildLocationInput(IconData icon, String hint, Color iconColor, TextEditingController controller) {
+  /// Ranked options straight from `/v1/plan`.
+  ///
+  /// Loading, empty and error are all rendered explicitly. A transport app that
+  /// shows a blank list when the network fails is worse than one that says so.
+  Widget _buildResults() {
+    final query = _query;
+    if (query == null) return const SizedBox.shrink();
+
+    return ref.watch(planProvider(query)).when(
+          loading: () => const Center(
+            child: Padding(
+              padding: EdgeInsets.all(32.0),
+              child: CircularProgressIndicator(color: AppTheme.primaryBlue),
+            ),
+          ),
+          error: (error, _) => _buildError(error),
+          data: (plan) {
+            if (plan.options.isEmpty) {
+              return _buildNotice(
+                Icons.search_off,
+                'No direct service found between these stops in the next hour.',
+              );
+            }
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Text('Suggested Routes',
+                        style: Theme.of(context).textTheme.titleLarge),
+                    const Spacer(),
+                    Text('${plan.options.length} options',
+                        style: const TextStyle(
+                            color: AppTheme.textSecondary, fontSize: 12)),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                for (final option in plan.options) _buildOptionCard(option),
+              ],
+            );
+          },
+        );
+  }
+
+  Widget _buildError(Object error) {
+    final message = error is ApiException
+        ? error.friendlyMessage
+        : 'Could not plan this journey.';
+    return _buildNotice(Icons.cloud_off, message, retry: true);
+  }
+
+  Widget _buildNotice(IconData icon, String message, {bool retry = false}) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(24),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: AppTheme.textSecondary.withAlpha(40)),
+      ),
+      child: Column(
+        children: [
+          Icon(icon, color: AppTheme.textSecondary, size: 32),
+          const SizedBox(height: 12),
+          Text(message,
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: AppTheme.textSecondary)),
+          if (retry) ...[
+            const SizedBox(height: 12),
+            TextButton(
+              onPressed: () {
+                final q = _query;
+                if (q != null) ref.invalidate(planProvider(q));
+              },
+              child: const Text('Try again'),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  /// One ranked option. Every reason string comes from the API verbatim.
+  Widget _buildOptionCard(JourneyOption option) {
+    final crowd = option.boardingCrowd;
+    return GestureDetector(
+      onTap: () => _startJourney(option),
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 16),
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(16),
+          border: option.isRecommended
+              ? Border.all(color: AppTheme.primaryBlue, width: 2)
+              : null,
+          boxShadow: const [
+            BoxShadow(
+                color: AppTheme.cardShadow, blurRadius: 4, offset: Offset(0, 2)),
+          ],
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                CircleAvatar(
+                  backgroundColor: AppTheme.primaryBlue.withAlpha(20),
+                  child: const Icon(Icons.directions_bus,
+                      color: AppTheme.primaryBlue),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(option.routeLabel,
+                          style: const TextStyle(
+                              fontWeight: FontWeight.bold, fontSize: 16)),
+                      if (option.legs.isNotEmpty)
+                        Text(
+                          '${option.legs.first.boardStopName} to '
+                          '${option.legs.first.alightStopName}',
+                          style: const TextStyle(
+                              color: AppTheme.textSecondary, fontSize: 12),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                    ],
+                  ),
+                ),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    Text('${option.totalMinutes} min',
+                        style: const TextStyle(
+                            fontWeight: FontWeight.bold, fontSize: 16)),
+                    if (option.isRecommended)
+                      const Text('Recommended',
+                          style: TextStyle(
+                              color: AppTheme.primaryBlue,
+                              fontSize: 11,
+                              fontWeight: FontWeight.bold)),
+                  ],
+                ),
+              ],
+            ),
+            if (crowd != null) ...[
+              const SizedBox(height: 12),
+              _buildCrowdBand(crowd),
+            ],
+            const SizedBox(height: 12),
+            // Rule 3: every ranked option shows its reason, and the text is the
+            // server's -- the client never invents an explanation.
+            for (final reason in option.reasons)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 4),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Padding(
+                      padding: EdgeInsets.only(top: 2),
+                      child: Icon(Icons.check_circle_outline,
+                          size: 14, color: AppTheme.textSecondary),
+                    ),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(reason,
+                          style: const TextStyle(
+                              fontSize: 12, color: AppTheme.textSecondary)),
+                    ),
+                  ],
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// A forecast is a band, never a point (section 33.3 rule 2), and crowding is
+  /// never conveyed by colour alone (section 33.5) -- so the label is text.
+  Widget _buildCrowdBand(CrowdBand crowd) {
+    final colour = occupancyColour(crowd.p50Class);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: colour.withAlpha(18),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: colour.withAlpha(70)),
+      ),
+      child: Row(
+        children: [
+          Icon(crowd.isKnown ? Icons.people_outline : Icons.help_outline,
+              size: 16, color: colour),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(crowd.summary,
+                    style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: colour)),
+                if (crowd.isKnown && crowd.p50Onboard != null)
+                  Text(
+                    'when you board · ${crowd.p10Onboard}-${crowd.p90Onboard} '
+                    'of ${crowd.capacity} onboard'
+                    '${crowd.isFallback ? ' · estimated from history' : ''}',
+                    style: const TextStyle(
+                        fontSize: 10, color: AppTheme.textSecondary),
+                  ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// Origin/destination field with suggestions.
+  ///
+  /// `/v1/plan` takes coordinates, so free text has to resolve to a known
+  /// place. Typing "con" offers Connaught Place; selecting it pins the exact
+  /// coordinates rather than guessing from a string later.
+  Widget _buildLocationInput(IconData icon, String hint, Color iconColor,
+      TextEditingController controller) {
     return Row(
       children: [
         Icon(icon, color: iconColor),
         const SizedBox(width: 16),
         Expanded(
-          child: TextField(
-            controller: controller,
-            decoration: InputDecoration(
-              hintText: hint,
-              border: InputBorder.none,
+          child: Autocomplete<DelhiPlace>(
+            displayStringForOption: (place) => place.name,
+            optionsBuilder: (value) => searchPlaces(value.text).take(6),
+            onSelected: (place) => controller.text = place.name,
+            fieldViewBuilder: (context, textController, focusNode, onSubmitted) {
+              // Keep the outer controller authoritative so _handleSearch and
+              // "clear" keep working, but let Autocomplete drive the field.
+              if (textController.text != controller.text &&
+                  !focusNode.hasFocus) {
+                textController.text = controller.text;
+              }
+              textController.addListener(() => controller.text = textController.text);
+              return TextField(
+                controller: textController,
+                focusNode: focusNode,
+                onSubmitted: (_) => onSubmitted(),
+                decoration: InputDecoration(
+                  hintText: hint,
+                  border: InputBorder.none,
+                ),
+              );
+            },
+            optionsViewBuilder: (context, onSelected, options) => Align(
+              alignment: Alignment.topLeft,
+              child: Material(
+                elevation: 4,
+                borderRadius: BorderRadius.circular(12),
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxHeight: 240, maxWidth: 320),
+                  child: ListView.builder(
+                    padding: EdgeInsets.zero,
+                    shrinkWrap: true,
+                    itemCount: options.length,
+                    itemBuilder: (context, index) {
+                      final place = options.elementAt(index);
+                      return ListTile(
+                        dense: true,
+                        leading: const Icon(Icons.place_outlined, size: 18),
+                        title: Text(place.name,
+                            style: const TextStyle(fontSize: 14)),
+                        onTap: () => onSelected(place),
+                      );
+                    },
+                  ),
+                ),
+              ),
             ),
           ),
         ),
@@ -252,19 +484,26 @@ class _JourneyScreenState extends ConsumerState<JourneyScreen> {
     );
   }
 
-  Widget _buildPreferenceChip(String label) {
-    final isSelected = _selectedPreference == label;
+  Widget _buildPreferenceChip(PlanProfile profile) {
+    final isSelected = _selectedProfile == profile;
     return ChoiceChip(
-      label: Text(label),
+      label: Text(profile.label),
       selected: isSelected,
       onSelected: (bool selected) {
-        if (selected) {
-          setState(() => _selectedPreference = label);
-          // If a search was already performed, immediately re-fetch with new profile
-          if (_originPlace != null && _destPlace != null) {
-            _handleSearch();
+        if (!selected) return;
+        setState(() {
+          _selectedProfile = profile;
+          // Re-rank immediately if results are already on screen: the whole
+          // point is that the same candidates reorder for a different priority.
+          final q = _query;
+          if (q != null) {
+            _query = PlanQuery(
+              origin: q.origin,
+              destination: q.destination,
+              profile: profile,
+            );
           }
-        }
+        });
       },
       selectedColor: AppTheme.primaryBlue.withAlpha(30),
       labelStyle: TextStyle(
@@ -274,73 +513,11 @@ class _JourneyScreenState extends ConsumerState<JourneyScreen> {
     );
   }
 
-  Widget _buildRankedOption(JourneyOption option, bool isPrimary) {
-    final title = option.legs.isNotEmpty ? "Route ${option.legs.first.routeId}" : "Walk";
-    final eta = "${option.totalMinutes} mins";
-    
-    String reasonText = isPrimary ? 'Recommended Route' : 'Alternative Route';
-    if (option.reasons.isNotEmpty) {
-      reasonText = (isPrimary ? 'Recommended: ' : 'Alternative: ') + option.reasons.join(', ');
-    } else if (option.isRecommended) {
-       reasonText = 'Recommended Route';
-    }
-
-    return GestureDetector(
-      onTap: () => _startJourney(option),
-      child: Container(
-        margin: const EdgeInsets.only(bottom: 16),
-        padding: const EdgeInsets.all(16),
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(16),
-          border: isPrimary ? Border.all(color: AppTheme.primaryBlue, width: 2) : null,
-          boxShadow: const [
-            BoxShadow(color: AppTheme.cardShadow, blurRadius: 4, offset: Offset(0, 2)),
-          ],
-        ),
-        child: Row(
-          children: [
-            CircleAvatar(
-              backgroundColor: AppTheme.primaryBlue.withAlpha(20),
-              child: const Icon(Icons.directions_bus, color: AppTheme.primaryBlue),
-            ),
-            const SizedBox(width: 16),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text(title, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-                      Text(eta, style: const TextStyle(fontWeight: FontWeight.bold, color: AppTheme.primaryBlue)),
-                    ],
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    reasonText,
-                    style: TextStyle(
-                      color: isPrimary ? Colors.green : AppTheme.textSecondary,
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildActiveMode(JourneyOption option) {
-    final title = option.legs.isNotEmpty ? "Route ${option.legs.first.routeId}" : "Walk";
-    final dest = option.legs.isNotEmpty ? option.legs.last.alightStopName : (_destController.text.isNotEmpty ? _destController.text : "Destination");
-    
-    // We can pull the departure and arrival times from the option
-    final depFormat = DateFormat.Hm().format(option.departure.toLocal());
-    final arrFormat = DateFormat.Hm().format(option.arrival.toLocal());
+  Widget _buildActiveMode() {
+    // _startJourney sets these together; the active view is the selected
+    // journey, so there is nothing to draw without it.
+    final query = _query!;
+    final option = _activeOption!;
 
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -401,7 +578,7 @@ class _JourneyScreenState extends ConsumerState<JourneyScreen> {
               ),
               const SizedBox(height: 16),
               Text(
-                title,
+                option.routeLabel,
                 style: const TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.w900, letterSpacing: -0.5),
               ),
               const SizedBox(height: 2),
@@ -411,7 +588,7 @@ class _JourneyScreenState extends ConsumerState<JourneyScreen> {
                   const SizedBox(width: 6),
                   Expanded(
                     child: Text(
-                      dest,
+                      query.destination.name,
                       style: TextStyle(color: Colors.white.withAlpha(220), fontSize: 15, fontWeight: FontWeight.w500),
                       overflow: TextOverflow.ellipsis,
                     ),
@@ -423,45 +600,30 @@ class _JourneyScreenState extends ConsumerState<JourneyScreen> {
         ),
         const SizedBox(height: 16),
 
-        // RULE 6: SIMULATED DATA BANNER
-        Container(
-          width: double.infinity,
-          padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 20),
-          decoration: BoxDecoration(
-            color: Colors.orange.shade50,
-            borderRadius: BorderRadius.circular(20),
-            border: Border.all(color: Colors.orange.shade200, width: 1.5),
-          ),
-          child: Row(
-            children: [
-              Container(
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(color: Colors.orange.shade100, shape: BoxShape.circle),
-                child: Icon(Icons.science_rounded, color: Colors.orange.shade800, size: 24),
-              ),
-              const SizedBox(width: 16),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'SIMULATED DATA (DEMO)',
-                      style: TextStyle(
-                        color: Colors.orange.shade900,
-                        fontWeight: FontWeight.w900,
-                        letterSpacing: 0.5,
-                        fontSize: 14,
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      'Synthetic network traffic, not real Delhi data.',
-                      style: TextStyle(color: Colors.orange.shade700, fontSize: 13, fontWeight: FontWeight.w500),
-                    ),
-                  ],
-                ),
-              ),
-            ],
+        // Rule 6 still applies -- synthetic data must not be presented as real
+        // operator data -- but it does not need a full-width slab on the main
+        // journey screen. A compact tag reads as a product label, not a warning.
+        Align(
+          alignment: Alignment.centerLeft,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+            decoration: BoxDecoration(
+              color: AppTheme.textSecondary.withAlpha(20),
+              borderRadius: BorderRadius.circular(20),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.science_outlined,
+                    size: 13, color: AppTheme.textSecondary),
+                const SizedBox(width: 5),
+                Text('Simulated data',
+                    style: TextStyle(
+                        color: AppTheme.textSecondary,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w500)),
+              ],
+            ),
           ),
         ),
         const SizedBox(height: 24),
@@ -472,8 +634,8 @@ class _JourneyScreenState extends ConsumerState<JourneyScreen> {
           width: double.infinity,
           child: JourneyLiveMap(
             option: option,
-            originPlace: _originPlace,
-            destPlace: _destPlace,
+            originPlace: query.origin,
+            destPlace: query.destination,
           ),
         ),
         const SizedBox(height: 28),
@@ -483,7 +645,7 @@ class _JourneyScreenState extends ConsumerState<JourneyScreen> {
           child: Text('Journey Progress', style: Theme.of(context).textTheme.titleLarge?.copyWith(fontWeight: FontWeight.w900)),
         ),
         const SizedBox(height: 16),
-        
+
         // Premium Live Progress Card
         Container(
           padding: const EdgeInsets.all(24),
@@ -497,17 +659,62 @@ class _JourneyScreenState extends ConsumerState<JourneyScreen> {
           ),
           child: Column(
             children: [
-              _buildPremiumStop(option.legs.isNotEmpty ? option.legs.first.boardStopName : 'Start', depFormat, 'Departed', true, false, null),
-              
-              if (option.legs.isNotEmpty)
-                _buildPremiumStop(option.legs.first.alightStopName, arrFormat, 'Live ETA', false, true, _buildCrowdIndicator(option.legs.first.crowd.p50Class.toString(), 'Estimated load')), 
-              
-              _buildPremiumStop(dest, arrFormat, 'Scheduled', false, false, null, isLast: true),
+              ..._buildProgressStops(option),
             ],
           ),
         ),
       ],
     );
+  }
+
+  static String _hhmm(DateTime t) {
+    final local = t.toLocal();
+    return '${local.hour.toString().padLeft(2, '0')}:'
+        '${local.minute.toString().padLeft(2, '0')}';
+  }
+
+  /// The timeline of the journey the user selected: board the first leg, change
+  /// at each transfer, arrive at the last alight. Every stop name, time and
+  /// crowd band here comes from `/v1/plan`.
+  ///
+  /// Nothing is marked as already departed -- the app has no fix on where the
+  /// passenger is along the trip, and claiming otherwise would be a guess
+  /// dressed as tracking.
+  List<Widget> _buildProgressStops(JourneyOption option) {
+    final legs = option.legs;
+    if (legs.isEmpty) return const [];
+
+    return [
+      for (var i = 0; i < legs.length; i++)
+        _buildPremiumStop(
+          legs[i].boardStopName,
+          _hhmm(legs[i].departure),
+          i == 0 ? 'Board' : 'Change',
+          false,
+          i == 0,
+          _buildBandIndicator(legs[i].crowd),
+        ),
+      _buildPremiumStop(
+        legs.last.alightStopName,
+        _hhmm(legs.last.arrival),
+        'Arrive',
+        false,
+        false,
+        null,
+        isLast: true,
+      ),
+    ];
+  }
+
+  /// A forecast is a band, not a number: an unknown one still renders, and a
+  /// known one is shown p10-p90 with the fallback disclosed.
+  Widget _buildBandIndicator(CrowdBand band) {
+    if (!band.isKnown) return _buildCrowdIndicator('UNKNOWN', 'No forecast data');
+    final detail = band.p10Onboard != null && band.capacity != null
+        ? '${band.p10Onboard}-${band.p90Onboard} of ${band.capacity} onboard'
+            '${band.isFallback ? ' · estimated from history' : ''}'
+        : band.summary;
+    return _buildCrowdIndicator(band.p50Class.toString(), detail);
   }
 
   Widget _buildCrowdIndicator(String occupancyClass, String forecastData) {
@@ -599,7 +806,7 @@ class _JourneyScreenState extends ConsumerState<JourneyScreen> {
             ),
           ),
           const SizedBox(width: 16),
-          
+
           // Timeline Node
           Column(
             children: [
@@ -630,7 +837,7 @@ class _JourneyScreenState extends ConsumerState<JourneyScreen> {
             ],
           ),
           const SizedBox(width: 16),
-          
+
           // Content Column
           Expanded(
             child: Padding(

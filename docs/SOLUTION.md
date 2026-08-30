@@ -236,6 +236,15 @@ not a rewrite.
 5. Review forecast confidence to distinguish strong signals from uncertain ones.
 6. Export route-level operational summaries for planning.
 
+### 3.3 Conductor use cases
+
+1. A bus crew member starts a shift and binds their phone to the vehicle and service they are running.
+2. Report the current crowd level with one tap.
+3. The phone reports position in the background while the shift is active.
+4. End the shift.
+
+This role exists so a city with no automatic passenger counters and no public occupancy feed can still produce real occupancy labels.
+
 ---
 
 ## 4. Requirements
@@ -260,6 +269,8 @@ not a rewrite.
 | FR-14 | Show route/vehicle/hotspot maps and forecast explanations. | P4, P6 |
 | FR-15 | Store feedback/outcome data for model evaluation and retraining. | P3 |
 | FR-16 | Record whether every data point is real, inferred, crowdsourced or simulated. | P0 |
+| FR-17 | Accept occupancy and position reports from authenticated transit staff on a mobile device, bound to a specific vehicle and service. | P3 |
+| FR-18 | Authenticate and authorise every write to live vehicle state; passenger read access stays anonymous. | P3 |
 
 ### 4.2 Non-functional requirements
 
@@ -390,17 +401,15 @@ delay estimation. [R5] Processing rules:
 Occupancy is the most operator-specific source. The platform supports a hierarchy, each mapped
 into the same observation contract (§26.2):
 
-| Priority | Source | `source_type` | Notes |
-|---|---|---|---|
-| 1 | APC (door sensors/counters) | `APC` | Boardings, alightings, onboard count. Strongest ground truth. |
-| 2 | Operator load feed | `REAL_OPERATOR` | Direct load category. **This is what MBTA provides.** |
-| 3 | AFC / e-ticketing | `AFC` | Boarding demand; alighting may need inference. |
-| 4 | Crowdsourcing | `CROWDSOURCED` | Fused by recency and consensus (§8.3). |
-| 5 | Simulation | `SIMULATED` | Always tagged. Never mixed into production training without an explicit flag. |
+1. Automatic passenger counters (`APC`) and fare/ticketing counts (`AFC`) — machine counts.
+2. Operator-published occupancy from an agency feed (`REAL_OPERATOR`, e.g. MBTA `occupancy_status`).
+3. **Conductor-reported occupancy from an authenticated shift** — also `REAL_OPERATOR`, but distinguished by `source_name = "conductor_app"`. A human judgement by staff on board.
+4. Anonymous passenger crowd reports (`CROWDSOURCED`) — weighted by recency and consensus (§8.3).
+5. Model-derived or simulated values (`DERIVED`, `SIMULATED`).
 
-Higher priority overrides lower when fresh and trusted. For a demo, synthetic occupancy is an
-acceptable instrumentation substitute, but **metrics computed on synthetic labels are reported
-as simulator performance, never as real-world accuracy.**
+A conductor report never automatically overrides a *fresher* machine count; fusion is by trust tier **and** recency together, exactly as §8.3 already specifies. Do NOT introduce a new `source_type` value — the enum is fixed and `REAL_OPERATOR` + `source_name` already carries this.
+
+For a demo, synthetic occupancy is an acceptable instrumentation substitute, but **metrics computed on synthetic labels are reported as simulator performance, never as real-world accuracy.**
 
 ### 6.6 External passenger-flow data for experimentation
 
@@ -732,6 +741,7 @@ Executable DDL is in §27.
 |---|---|---|
 | GET | `/v1/plan` | Ranked itineraries for origin/destination/time/preference. |
 | GET | `/v1/trips/{tripId}/forecast` | Crowd + ETA forecast by upcoming stop. |
+| GET | `/v1/trips/{tripId}` | Trip detail: origin, destination and the ordered stop path. |
 | GET | `/v1/vehicles` | Fleet inside a viewport bounding box. **`bbox` is required** and the result is capped server-side (§12.4 rule 5). |
 | GET | `/v1/vehicles/{vehicleId}` | Current vehicle state and freshness. |
 | GET | `/v1/stops/{stopId}/departures` | Predicted upcoming departures with crowd status. |
@@ -773,11 +783,16 @@ Executable DDL is in §27.
 
 ### 12.5 Conductor APIs
 
-To support cities without public feeds (like Delhi), we provide an ingestion endpoint for conductors.
-- `POST /v1/telemetry/conductor`
-  - Accepts a stream of `VehiclePositionEvent` and manual `OccupancyObservation` objects.
-  - Tags data with `source_type=CONDUCTOR_APP`.
-  - Injects directly into Redis state and telemetry tables, bypassing GTFS polling.
+| Method | Endpoint | Purpose |
+|---|---|---|
+| POST | `/v1/auth/login` | Exchange staff credentials for a short-lived access token. |
+| POST | `/v1/shifts/start` | Bind the authenticated device to a vehicle and service; returns a shift id. |
+| POST | `/v1/shifts/{id}/position` | Report device position for an active shift. |
+| POST | `/v1/shifts/{id}/end` | Close the shift; the device stops reporting. |
+
+- `POST /v1/occupancy/report` (already in §12.1) is the **single** occupancy write path. There is no separate conductor occupancy endpoint. When the caller presents a valid shift token the report is stored at the conductor trust tier; when it is anonymous it is stored as `CROWDSOURCED`. **The trust tier is decided by the credential, never by the URL.**
+- Conductor position reports produce ordinary `VehiclePositionEvent`s (§26) with `source_type=REAL_OPERATOR` and `source_name="conductor_app"`. No new event contract is added.
+- **A position with no active shift is rejected.** The shift is what binds a phone to a `vehicle_id` and a `trip_id`; without that binding the position cannot be joined to the network and is useless to every downstream consumer.
 
 ---
 
@@ -851,10 +866,10 @@ work, because we control the database image -- and gives judges a single URL.
 ```
                     internet
                        |
-                  Caddy :443            automatic TLS, HTTP/2
+                  Caddy :443            automatic TLS, HTTP/2 (mandatory for Android)
                    /        \
-        static frontend    /api -> FastAPI :8000
-                                      |
+   operator web dash       /api -> FastAPI :8000
+    + APK & basemap                   |
                           +-----------+-----------+
                           |                       |
                  timescaledb + postgis        redis
@@ -864,8 +879,10 @@ work, because we control the database image -- and gives judges a single URL.
 | Concern | Decision |
 |---|---|
 | Host | One VM, **minimum 4 GB RAM / 2 vCPU / 40 GB disk**. The static GTFS import alone is 2.2M stop-times. |
-| TLS | Caddy, automatic certificates. No manual certificate handling. |
-| Compose | A `deploy` profile adds Caddy and the built frontend to the existing stack. The dev stack stays unchanged. |
+| TLS | Caddy, automatic certificates. No manual certificate handling. **TLS is now mandatory, not optional**, because Android blocks cleartext HTTP by default. |
+| Compose | A `deploy` profile adds Caddy and the built operator dashboard to the existing stack. The dev stack stays unchanged. |
+| Assets | Caddy serves the static web bundle for the **operator dashboard only** (the passenger web client is gone). It additionally serves the **APK** and the **offline basemap tile file** as static downloads. |
+| Mobile App | Distributed as a **signed release APK** installed on the demo device(s); the demo must not depend on an app store review. |
 | Secrets | `.env` on the host only, never in the repo (§32). The database password is not the development default. |
 | Exposure | **Only 80/443 are published.** Postgres and Redis stay on the internal Compose network -- never published to the host in the deploy profile. |
 | Data | The recorded corpus is not shipped in the image. The VM imports GTFS and replays a Parquet subset. |
@@ -882,7 +899,6 @@ have no connectivity, and the live feed may be down at the wrong moment. Both pa
 |---|---|
 | Transport feed credentials | Secrets manager; never embed keys in the frontend; rotate and scope; outbound proxy if required. |
 | Passenger authentication | Optional for anonymous planning; OAuth/OIDC for accounts; short-lived tokens. |
-| Conductor authentication | Mandatory (JWT/API Keys). Conductors have write access to system state; unauthenticated POSTs are strictly forbidden to prevent GPS spoofing. |
 | Operator access | RBAC roles (viewer, dispatcher, admin); MFA for privileged accounts. |
 | Transport security | TLS everywhere; certificate validation; secure WebSocket. |
 | Data at rest | Encrypted managed disks/object storage; encrypted backups. |
@@ -910,6 +926,15 @@ have no connectivity, and the live feed may be down at the wrong moment. Both pa
 | GPS spoof / outlier | Corrupted ETA and crowd features | Map matching, impossible-speed checks, multi-point consistency. |
 | Model poisoning via synthetic data | Biased production model | Provenance filtering; production training excludes `SIMULATED` unless explicitly allowed. |
 | Trip-history exposure | Privacy harm | Minimal retention, access controls, aggregation, encryption. |
+
+### 15.3 Authentication and authorisation
+
+- Three roles: **passenger** (anonymous, read-only), **conductor** (authenticated, may write position and occupancy for their own active shift only), **operator** (authenticated, read-only across the fleet plus scenario endpoints).
+- Staff credentials are issued out of band; there is **no public sign-up**.
+- Tokens are short-lived bearer tokens; passwords are stored only as salted hashes.
+- A conductor may only write to the shift they own. Attempting to write to another vehicle's shift is rejected and logged.
+- State the threat plainly: **without this, anyone who installs the app can move the city's buses on the map.** Unauthenticated write access to live vehicle state is the single highest-severity risk this system carries.
+- Passenger builds ship no credentials of any kind (this preserves the existing "no secrets in the bundle" rule).
 
 ---
 
@@ -1015,6 +1040,15 @@ repeatability by seed.
 | Weather | Real historical values joined by timestamp. |
 | Models | Pre-trained artefacts loaded from the registry; no training during the demo. |
 
+The demo uses **two cities, for two different jobs, and the distinction is stated on screen.**
+**Delhi** is the demonstration city: the real Delhi network, real stop and route names, real
+geography, with vehicle movement and crowding produced by the calibrated simulator (§28.9) and
+tagged `SIMULATED` throughout. **MBTA (Boston)** is the evidence city: the only corpus in the
+project with real operator occupancy labels, and therefore the only source any accuracy claim may
+be computed from. The simulator's parameters are *measured from* the Boston corpus rather than
+invented, which is what makes the Delhi demand profile defensible -- but a number produced on
+simulated labels is reported as simulator performance and never as real-world accuracy (§6.5).
+
 ### 19.2 The five-minute script
 
 1. **The problem** — show a vehicle that is empty now and full at the passenger's stop.
@@ -1023,6 +1057,7 @@ repeatability by seed.
 4. **Departure advice** — "leave 15 minutes later" with the forecast curve behind it.
 5. **Inject an event** — replay a crowding spike; the active journey re-scores live.
 6. **Operator view** — the same event appears as a predicted hotspot with lead time.
+7. **Conductor mode** — **switch roles** to conductor, tap a crowd level, and show it appear in the operator's fleet view — the cold-start story in ten seconds.
 
 **The entire script must run offline from recorded replay.** No live internet dependency.
 
@@ -1092,8 +1127,8 @@ Per-phase acceptance gates are in §31.
 
 | Layer | Choice | Notes |
 |---|---|---|
-| Passenger UI | React + MapLibre (web) | Flutter/React Native if mobile is required. |
-| Operator UI | React + map component | Server-side auth/RBAC. |
+| Passenger + conductor client | Flutter (Android) + MapLibre Native | iOS is a later target; the codebase is already cross-platform. |
+| Operator dashboard | React + TypeScript + MapLibre GL JS (web) | Runs in a browser on a control-room screen; server-side auth/RBAC (§15.3). |
 | Backend APIs | **Python 3.12 + FastAPI** | Async I/O for feeds; good fit with the Python ML stack. |
 | Transit planning | RAPTOR/CSA implementation or a GTFS routing engine | Kept behind the `TripPlanner` interface. |
 | Operational DB | **PostgreSQL 16 + PostGIS** | TimescaleDB extension for telemetry. |
@@ -1171,6 +1206,10 @@ SIH/
 │   │   ├── validate.py
 │   │   ├── mapmatch.py
 │   │   └── stop_passage.py
+│   ├── sim/                         ← calibrated demand simulator (§28.9)
+│   │   ├── calibrate.py             ← fits parameters from a REAL corpus
+│   │   ├── demand.py                ← behavioural board/alight rules
+│   │   └── generate.py              ← emits SIMULATED canonical events
 │   ├── state/
 │   │   ├── redis_state.py
 │   │   └── headway.py
@@ -1195,18 +1234,28 @@ SIH/
 │       ├── passenger.py
 │       ├── admin.py
 │       └── stream.py
+├── scripts/
+│   └── demo.sh                      ← one-command demo stack (§19)
 ├── migrations/                      ← SQL migrations, forward-only
 ├── tests/
 │   ├── unit/
 │   ├── integration/
 │   └── parity/                      ← online/offline feature parity
-├── frontend/                        ← React + Vite + MapLibre (see §33)
+├── frontend/                        ← operator web dashboard (React + Vite + MapLibre GL JS, see §33.6)
 │   ├── src/
 │   │   ├── api/                     ← generated client for §29 contracts
 │   │   ├── components/              ← map, option cards, forecast bands, badges
 │   │   ├── routes/                  ← live map · planner · journey · operator
 │   │   └── lib/                     ← formatting, live-update socket, state rules
 │   └── index.html
+├── app/                             ← Flutter mobile client (see §33)
+│   ├── lib/
+│   │   ├── api/                     ← generated client + models from the OpenAPI schema
+│   │   ├── features/                ← passenger/ operator/ conductor/
+│   │   ├── shared/                  ← widgets, theme, formatting
+│   │   └── local/                   ← bundled static timetable (SQLite) + cache
+│   ├── android/
+│   └── pubspec.yaml
 ├── deploy/
 │   ├── Caddyfile                    ← TLS + static + /api reverse proxy
 │   ├── compose.deploy.yml           ← the `deploy` profile overlay (§14.4)
@@ -1221,7 +1270,7 @@ SIH/
 
 - `src/pravaah/contracts/` may not import from any other package in `pravaah`. It is the leaf.
 - `adapters/` may import `contracts/` only.
-- Nothing outside `adapters/` and `config/cities/` may contain a city name.
+- Nothing outside `adapters/` and `config/cities/` may contain a city name. **No city name may appear in `app/`.**
 - `features/definitions.py` is imported by **both** `offline.py` and `online.py`. No feature logic exists anywhere else.
 - `models/` may not import `routing/`; `routing/` may not import `models/` directly — it consumes forecasts through the orchestrator.
 
@@ -1464,7 +1513,34 @@ CREATE TABLE feedback (
     observed_outcome JSONB,
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
+
+CREATE TABLE app_user (
+  user_id      BIGSERIAL PRIMARY KEY,
+  username     TEXT NOT NULL UNIQUE,
+  password_hash TEXT NOT NULL,
+  role         TEXT NOT NULL CHECK (role IN ('CONDUCTOR','OPERATOR')),
+  city_id      TEXT NOT NULL,
+  agency_id    TEXT,
+  is_active    BOOLEAN NOT NULL DEFAULT TRUE,
+  created_at   TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+
+CREATE TABLE conductor_shift (
+  shift_id     BIGSERIAL PRIMARY KEY,
+  user_id      BIGINT NOT NULL REFERENCES app_user(user_id),
+  city_id      TEXT NOT NULL,
+  vehicle_id   TEXT NOT NULL,
+  trip_id      TEXT,
+  route_id     TEXT,
+  device_id    TEXT NOT NULL,
+  started_at   TIMESTAMPTZ NOT NULL DEFAULT now(),
+  ended_at     TIMESTAMPTZ
+);
+CREATE UNIQUE INDEX conductor_shift_one_active
+  ON conductor_shift (city_id, vehicle_id) WHERE ended_at IS NULL;
 ```
+
+The partial unique index enforces that **one vehicle has at most one active shift**, so two phones cannot claim the same bus. This implies a new forward-only migration file (`migrations/005_auth.sql`) in keeping with the project's forward-only migration rule.
 
 **Schema rules:**
 
@@ -1595,6 +1671,44 @@ def rank(candidates: list[EnrichedItinerary], profile: PreferenceProfile) -> lis
     """
 ```
 
+### 28.9 `sim/` -- calibrated demand simulator
+
+Produces occupancy and movement for a city that publishes none (§6.2.2), so the full pipeline can
+be demonstrated on the deployment target. Every emitted record carries `source_type=SIMULATED` and
+`source_name="simulator_v1"`.
+
+`sim/calibrate.py` **measures** parameters from a real recorded corpus rather than inventing them.
+It fits, per route type and per hour of week: the occupancy-class distribution, the load profile
+along a trip, boarding and alighting shape, and the peak/off-peak ratio. Output is a versioned JSON
+profile in `config/calibration/`. **Deduplication is mandatory**: the recorded window
+2026-08-28 -> 08-30 contains multiply-written rows from concurrent recorders (§28.2), so
+calibration deduplicates on `(vehicle_id, vehicle_ts)` before fitting. Fitting on the raw file
+triple-counts the busiest window and biases every parameter.
+
+`sim/demand.py` is the behavioural model §18.1 requires. Board and alight events come from explicit
+rules -- stop-specific boarding propensity, destination-driven alighting, AM/PM peak multipliers,
+day-of-week factors, weather and event multipliers, capacity clipping at crush load. **Occupancy is
+the running sum of boardings minus alightings, never a sampled percentage.**
+
+`sim/generate.py` runs a service day over a real GTFS network and emits canonical
+`VehiclePositionEvent` and `OccupancyObservation` records through the same contracts as a live
+adapter, so nothing downstream can tell the difference except by reading provenance.
+
+**Boston supplies the shape; the target city supplies the scale.** The city profile carries vehicle
+capacity (seated, standing, crush), peak windows, the weekly pattern and a demand multiplier.
+Changing city is changing configuration, not code -- the city-knowledge rule in §5 applies here
+exactly as it does to adapters.
+
+**Binding constraints.**
+- `source_type=SIMULATED` on every emitted record, with no code path able to omit it.
+- Deterministic and repeatable from a seed (§18.1).
+- Passengers are conserved: boardings minus alightings over a completed trip is zero, onboard is
+  never negative and never exceeds crush capacity.
+- Metrics computed on simulated labels are **simulator performance, never real-world accuracy**
+  (§6.5). No KPI in §21 may be quoted from a simulated run.
+
+---
+
 ## 29. API request/response schemas
 
 ### 29.1 `GET /v1/plan`
@@ -1685,14 +1799,74 @@ always present and is `"UNKNOWN"` when the vehicle reported nothing — never om
 Rate-limited per session. Stored with `source_type=CROWDSOURCED` and a confidence derived by
 §8.3. Never overrides a fresh `APC` or `REAL_OPERATOR` observation.
 
+When the request carries a valid shift token the observation is stored with `source_type=REAL_OPERATOR` and `source_name="conductor_app"`; anonymous reports remain `CROWDSOURCED`.
+
 ### 29.4 Error shape
 
 ```json
 {"error": {"code": "NO_ROUTE_FOUND", "message": "...", "request_id": "..."}}
 ```
 
-Codes: `NO_ROUTE_FOUND`, `INVALID_COORDINATES`, `OUT_OF_SERVICE_AREA`, `FEED_UNAVAILABLE`,
-`RATE_LIMITED`, `INTERNAL`.
+Codes: `NO_ROUTE_FOUND`, `INVALID_COORDINATES`, `OUT_OF_SERVICE_AREA`, `FEED_UNAVAILABLE`, `RATE_LIMITED`, `INTERNAL`, `SHIFT_NOT_ACTIVE`, `VEHICLE_ALREADY_CLAIMED`, `UNAUTHORIZED` (401 -- absent or invalid credentials), `FORBIDDEN` (403 -- authenticated, but the role or shift does not permit this).
+
+### 29.5 Conductor endpoints
+
+**`POST /v1/auth/login`**
+```json
+{"username":"...","password":"..."}
+```
+*Response:* `{"access_token":"...","role":"CONDUCTOR","expires_in":28800}`
+
+**`POST /v1/shifts/start`**
+*(Requires bearer token)*
+```json
+{"vehicle_id":"...","trip_id":"...","route_id":"...","device_id":"..."}
+```
+*Response:* `{"shift_id":123,"started_at":"..."}`
+
+**`POST /v1/shifts/{id}/position`**
+*(Requires bearer token)*
+```json
+{"lat":42.3601,"lon":-71.0589,"accuracy_m":12.5,"speed_mps":8.2,"timestamp":"..."}
+```
+*Response:* `204 No Content`
+
+**`POST /v1/shifts/{id}/end`**
+*(Requires bearer token)*
+*Empty body.*
+*Response:* `204 No Content`
+
+**`POST /v1/occupancy/report` (Conductor)**
+*(Requires bearer token)*
+```json
+{"trip_id":"...","vehicle_id":"...","occupancy_class":"FEW_SEATS_AVAILABLE","reported_at":"..."}
+```
+*Response:* `202 Accepted`
+
+
+### 29.6 `GET /v1/trips/{tripId}`
+
+```json
+{
+  "generated_at": "...", "city_id": "delhi",
+  "trip_id": "DL420-0-1300", "route_id": "DL420",
+  "route_name": "Kashmere Gate ISBT to Connaught Place",
+  "direction_id": 0,
+  "origin": {"stop_id": "DLN0005", "name": "Kashmere Gate ISBT", "lat": 28.6675, "lon": 77.2285},
+  "destination": {"stop_id": "DLN0000", "name": "Connaught Place", "lat": 28.6315, "lon": 77.2167},
+  "stops": [
+    {"stop_id": "DLN0005", "name": "Kashmere Gate ISBT", "lat": 28.6675, "lon": 77.2285,
+     "stop_sequence": 1, "scheduled_arrival": "..."}
+  ]
+}
+```
+
+Answers "where is this bus coming from, where is it going, and by what path" when a
+passenger taps a vehicle. `stops` is ordered by `stop_sequence`, so a client draws the
+path by joining the coordinates -- the network carries no separate shape geometry, and
+inventing one client-side would put a drawn line where no bus goes.
+
+---
 
 ## 30. Configuration and city profiles
 
@@ -1786,8 +1960,8 @@ Live vehicles from the real feed, on the real network, on a public URL. No predi
 | A.1 | `adapters/base.py`, `adapters/gtfs_rt.py`, `adapters/mbta.py` | A live poll produces valid `VehiclePositionEvent`s; **zero records lack provenance**; `speed_mps` is left None (§28.4). |
 | A.2 | `ingest/validate.py`, `state/redis_state.py` | Out-of-bounds and impossible-speed positions are rejected with a reason; latest-state read < 5 ms; state rebuilds from the database after a Redis restart. |
 | A.3 | `api/main.py`, `api/passenger.py` (read-only: `/v1/vehicles/{id}`, `/v1/stops/{id}/departures`), `/v1/health` | Contract tests against §29 shapes; every response carries `generated_at` and freshness. |
-| A.4 | `frontend/` live map (§33) | Vehicles move on the correct routes; a stale feed shows the freshness badge; **an unknown occupancy never renders as empty** (§33.3). |
-| A.5 | `deploy/` per §14.4 | A clean clone reaches a working public URL by documented runbook; only 80/443 exposed; Postgres and Redis unreachable from outside. |
+| A.4 | **Flutter app shell + live map** (`app/`, §33.1-33.5) | Vehicles move on the correct routes; a stale feed shows the freshness badge; **an unknown occupancy never renders as empty** (§33.3); **the four passenger tabs are navigable and the app renders from the deployed API on a physical device.** |
+| A.5 | `deploy/` per §14.4 | A clean clone reaches a working public HTTPS API by documented runbook, and **a signed APK installs on a device and shows live vehicles**; only 80/443 exposed; Postgres and Redis unreachable from outside. |
 
 ### Slice B — It predicts
 
@@ -1820,7 +1994,7 @@ The cheapest honest forecast, end to end, with its uncertainty visible.
 | Step | Build | Gate |
 |---|---|---|
 | E.1 | `ops/hotspots.py`, `api/admin.py` | A predicted hotspot is reported **before** the capacity threshold is breached, with lead time and supporting evidence. |
-| E.2 | Operator dashboard (§33.2) | Hotspot map, route forecast and fleet health with data-freshness flags; RBAC enforced server-side. |
+| E.2 | Operator dashboard (`frontend/`, §33.6) | Hotspot map, route forecast and fleet health with data-freshness flags; RBAC enforced server-side. |
 
 ### Slice F — Deepen and harden
 
@@ -1835,13 +2009,43 @@ it replaces.**
 | F.4 | `adapters/replay.py`, offline demo | The full five-minute script runs **with networking disabled**. |
 | F.5 | Monitoring, `ops/health.py`, docs | §16.2 metrics exposed; `/v1/admin/data-health` reports feed freshness and validation failures. |
 
+### Slice G — Conductor mode (authenticated write path)
+
+This is what makes a city with no occupancy feed viable, and it is the only part of the system that writes to live vehicle state, so it is also the only part that needs authentication.
+
+| Step | Build | Gate |
+|---|---|---|
+| G.1 | `app_user`, `conductor_shift` tables + `migrations/005_auth.sql`; `POST /v1/auth/login` | A staff login returns a token; a bad password is rejected; no public sign-up path exists. |
+| G.2 | Shift lifecycle endpoints (§12.5) | A second device cannot claim a vehicle that already has an active shift; a position with no active shift is rejected. |
+| G.3 | Conductor tab in the app: shift start/end, four large crowd buttons, background position while on shift | A tap appears in live state within 5 s tagged `source_name=conductor_app`; ending the shift stops reporting. |
+| G.4 | Fusion at the conductor trust tier (§6.5) | A conductor report outranks an anonymous passenger report; it does **not** override a fresher machine count. |
+
+**Slice G may be pulled ahead of Slice E** when the demo needs the cold-start story, but it must never be pulled ahead of Slice B or C — the forecast and the ranked plan are the problem statement, and conductor mode only feeds them.
+
+### Slice H — Delhi demo substrate (calibrated simulation)
+
+Delhi publishes vehicle positions but no occupancy, and no Indian agency publishes any (§6.2.2).
+This slice makes the deployment target demonstrable **without pretending the crowd data is
+observed**. It is demo infrastructure, not product: it never produces a headline accuracy number.
+
+| Step | Build | Gate |
+|---|---|---|
+| H.1 | `sim/calibrate.py` and a committed calibration profile fitted on the **deduplicated** MBTA corpus | Parameters reproduce from the corpus; fitted AM/PM peaks match the measured feed within tolerance; the deduplication step is asserted by test, not assumed. |
+| H.2 | `config/cities/delhi.toml` extended with capacity, peak windows, weekly pattern and demand scale | **Every Delhi-specific number is sourced in a comment or explicitly marked an assumption.** An unsourced invented constant fails review. |
+| H.3 | `sim/demand.py`, `sim/generate.py` | Conservation, seed-repeatability and peak-shape tests pass; **100% of emitted records carry `source_type=SIMULATED`**. |
+| H.4 | Delhi GTFS network imported; a simulated service day runs into live state and the API | The map shows Delhi vehicles with crowd levels, every one visibly tagged simulated in the client (§33.3 rule 6). |
+
+**Slice H may run in parallel with B and C**, sharing no code with them. But the crowd model is
+still trained and evaluated on MBTA's real labels: a model trained on simulated labels and
+evaluated on simulated labels measures only the simulator.
+
 ### 31.1 Traceability to §20
 
 | §20 phase | Where it is executed |
 |---|---|
 | P0 Data foundation | Slice 0 |
 | P1 Live fleet | A.1–A.2, deepened by F.1 |
-| P2 Occupancy pipeline | F.2 |
+| P2 Occupancy pipeline | F.2, plus G.1–G.4 for conductor mode |
 | P3 Forecasting baseline | B.1–B.2, deepened by F.3 |
 | P4 Trip planning/ranking | C.1–C.4 |
 | P5 Live adaptation | D.1–D.2 |
@@ -1863,36 +2067,41 @@ it replaces.**
 
 ## 33. Frontend specification
 
-The frontend is a **working application against the live API**, not a mockup. It holds no
-business logic: it renders what §29 returns and never computes a forecast, a ranking or a crowd
-class locally.
+The passenger and conductor clients are a Flutter Android app; the operator dashboard is a React web application, because a control room runs on a desktop browser and a large screen, not on a phone.
+
+The frontend is a **working application against the live API**, not a mockup. It holds no business logic: it renders what §29 returns and never computes a forecast, a ranking or a crowd class locally.
 
 ### 33.1 Stack
 
 | Concern | Choice |
 |---|---|
-| Framework | Flutter (Dart), targeting Web and Mobile |
-| Map | flutter_map + pmtiles (offline-capable self-hosted Protomaps) |
-| Data fetching | Standard networking + one WebSocket for live updates (§12.1) |
-| State/Styling | Riverpod/Provider, native Flutter styling |
-| Build output | Flutter Web assets served by Caddy (§14.4), and/or compiled mobile APKs |
+| Framework | Flutter (stable channel), Dart, Android as the primary target |
+| Map | MapLibre Native (`maplibre_gl`), with a self-hosted offline `.pmtiles` basemap — no proprietary tile key |
+| State/data | A single typed API client generated from the FastAPI OpenAPI schema |
+| Local storage | SQLite on device, holding the bundled static timetable and the last-known live state |
+| Build output | A signed release APK served from the deployment VM (§14.4) |
 
-Types are generated from the FastAPI OpenAPI schema, so the client cannot drift from §29.
+Types are generated from the FastAPI OpenAPI schema, so the client cannot drift from §29. The app holds no business logic — it renders what the API returns and never computes a forecast, ranking or crowd class locally.
 
 ### 33.2 Screens
 
-| Route | Purpose | Slice |
+Three roles, switched from the profile tab of the passenger shell; a single installed app, not three builds.
+
+*Passenger — four tabs:*
+| Tab | Contents | Slice |
 |---|---|---|
-| `/` live map | Vehicles on the real network, with freshness and occupancy state | A.4 |
-| `/plan` journey planner | Origin/destination, four preference profiles, ranked options with reasons | C.4 |
-| `/journey/:id` live journey | The active trip, re-scored as conditions change | D.2 |
-| `/operator` dashboard | Predicted hotspots with lead time, route forecast, fleet health | E.2 |
-| `/*` (Conductor Mode) | High-contrast UI for manual GPS/occupancy inputs; background GPS polling | A.5 |
+| Home | Search "where to?", nearby vehicles, saved stops, recent destinations | A.4 |
+| Journey | Planning mode (origin/destination, four preference profiles, ranked options with reasons); becomes the live journey tracker once a trip starts | C.4 / D.2 |
+| Alerts & Saved | Saved routes available offline, disruptions, commute alerts | D.3 |
+| Profile | Accessibility settings, theme, role switch | A.4 |
+
+There is **no operator role in the mobile app**. The profile tab's role switch offers passenger and conductor only; operators use the web dashboard (§33.6).
+
+*Conductor — one screen:* shift start (pick route and service), four large high-contrast crowd buttons, shift end. Slice G. It must be usable one-handed, in sunlight, by someone who is also doing their actual job.
 
 ### 33.3 Data-state rules (binding)
 
-These are the passenger-visible half of §12.4. They are **not** styling preferences, and each has
-a gate in §31.
+These are the passenger-visible half of §12.4. They are binding on BOTH clients. They are **not** styling preferences, and each has a gate in §31.
 
 1. **Unknown is never empty.** A missing occupancy renders as "Unknown" in a neutral style. It
    must never appear as 0%, as an empty vehicle, or in the same colour as a genuinely empty one.
@@ -1913,6 +2122,9 @@ a gate in §31.
 - Respect the server's hysteresis: the UI does not re-sort on every message, only when the server
   reports that the preferred route changed (§10.5).
 - A dropped socket degrades to polling and says so; it never silently freezes.
+- Streaming runs only while a live screen is foregrounded; it stops when the app is backgrounded. Continuous polling from a mobile client is a defect — it holds the radio awake and drains the battery.
+- Vehicle markers **animate between position updates** rather than jumping.
+- The app is **offline-first**: the bundled static timetable renders stops, routes and scheduled times with no network at all. Live data layers on top and its absence is shown, never faked.
 
 ### 33.5 Non-negotiables
 
@@ -1923,6 +2135,34 @@ a gate in §31.
 - **Responsive to a phone viewport.** The passenger flow is the mobile case by default.
 - The map stays usable at city scale: viewport bounding boxes are requested from the API rather
   than fetching the whole fleet (§12.4 rule 5).
+- Passenger builds contain no credentials. Only conductor and operator sign in (§15.3).
+- Background location is requested **only** for an active conductor shift, is disclosed in-app, and stops when the shift ends.
+- Any data produced by conductor mode during a demo, with no real crew on board, is `SIMULATED` and must be visibly labelled as such (this is §33.3 rule 6, and it applies here).
+
+### 33.6 Operator web dashboard
+
+| Concern | Choice |
+|---|---|
+| Framework | React 18 + TypeScript, built with Vite |
+| Map | MapLibre GL JS, same self-hosted `.pmtiles` basemap as the app |
+| Data fetching | TanStack Query for reads; one WebSocket for live updates |
+| Build output | Static assets served by Caddy on the deployment VM (§14.4) |
+
+Four views, reached from a persistent side navigation (a desktop layout, not tabs):
+
+| View | Purpose | Slice |
+|---|---|---|
+| Fleet Command | Live map of all active vehicles; delayed or crowded vehicles highlighted, healthy routes muted | E.2 |
+| Predicted Hotspots | Ranked list of *future* problems with lead time and reason codes -- e.g. "this stop exceeds capacity in 45 minutes" | E.2 |
+| Route Diagnostics | Headway and bunching, historical reliability for the day, per-route load profile | E.3 |
+| System Health | Feed freshness, validation failure counts, ingestion lag, deployed model versions | E.3 |
+
+Binding notes:
+- The dashboard is **read-only over the fleet** plus the scenario endpoints (§12.2). It never writes vehicle state.
+- Operators sign in (§15.3). The dashboard is not publicly reachable without a session.
+- §33.3's six data-state rules apply here **in full and unchanged** -- an unknown occupancy is never drawn as empty on an operator screen either, and every forecast still shows its range.
+- Designed for a **1440px-and-wider desktop viewport**. It is not required to be responsive to a phone; that is what the mobile app is for.
+- The operator's value is **lead time**. A hotspot with no lead time is just a report of something already going wrong, which is the status quo this project exists to beat.
 
 # Appendix A — Example payloads
 
@@ -2015,9 +2255,31 @@ navigation apps have no incentive to build.
 | 2026-08-30 | **§31 restructured into vertical slices** (Slice 0/A/B/C/D/E/F) with a §31.1 traceability table back to §20 | A strict P0-P7 march leaves nothing visible or deployable until most of the work is done. Slices ship end to end and deploy early; later slices deepen what earlier ones stubbed | Owner |
 | 2026-08-30 | **§33 added: frontend specification** | The frontend was named in §25 and §23 but had no specification and only one incidental gate across 17 phase rows. It is a working application, so its data-state rules (unknown is never empty, uncertainty always visible, reasons always shown) are binding | Owner |
 | 2026-08-30 | **§14.4 added: public demo deployment on a single VM** | Deployment was absent from the build order entirely. One VM running the existing Compose stack keeps §27 unchanged, since TimescaleDB is unavailable on most managed free tiers. The offline replay requirement is retained, not replaced | Owner |
-| 2026-08-30 | **§12.1 and §29.2: added `GET /v1/vehicles` with a required bbox** | §33.2 mandates a live map and §12.4 rule 5 mandates viewport queries, but the passenger API only exposed a single-vehicle lookup, so the map could not be built from the contract as written. The operator API stays separate and RBAC-gated | Owner |
-| 2026-08-30 | **§33.1 stack changed to Flutter** | User preference to build a Flutter app rather than React. | Owner |
-| 2026-08-30 | **§12.5, §15, §33.2 Conductor Role Added** | Introduced a Conductor app/role to manually supply GPS and occupancy data, solving the Delhi "Cold Start" problem. | Owner |
+| 2026-08-30 | §12.1 and §29.2: added `GET /v1/vehicles` with a required bbox | §33.2 mandates a live map and §12.4 rule 5 mandates viewport queries, but the passenger API only exposed a single-vehicle lookup, so the map could not be built from the contract as written. The operator API stays separate and RBAC-gated | Owner |
+| 2026-08-30 | §3.3: Added conductor use cases | Clarifies real occupancy labels from staff without counters | Owner |
+| 2026-08-30 | §4.1: Added FR-17 and FR-18 | Formalizes conductor reporting and authentication requirements | Owner |
+| 2026-08-30 | §6.5: Explicit occupancy trust order | Defines trust hierarchy and fusion by recency | Owner |
+| 2026-08-30 | §12.5: Added Conductor APIs | Single occupancy write path with shift tracking | Owner |
+| 2026-08-30 | §14.4: Deployment changes for mobile client | Mandatory TLS; served APK and offline basemap | Owner |
+| 2026-08-30 | §15.3: Authentication and authorisation | Protects live vehicle state writes and manages roles | Owner |
+| 2026-08-30 | §23: Stack split for two clients | Separate Flutter mobile and React web clients | Owner |
+| 2026-08-30 | §25: Sibling Flutter app in repository layout | Adds app/ for passenger and conductor clients | Owner |
+| 2026-08-30 | §27: Added app_user and conductor_shift DDL | Database support for shifts and authentication | Owner |
+| 2026-08-30 | §29.5: Added conductor endpoints | JSON schemas for conductor login and shift tracking | Owner |
+| 2026-08-30 | §31: Build order for mobile app and Slice G | Re-aligns frontend targets and tests conductor writes | Owner |
+| 2026-08-30 | §33: Two-client frontend specification | Split passenger app and operator dashboard | Owner |
+| 2026-08-30 | §19: Demo script additions | Explicit target cities and conductor mode demonstration | Owner |
+| 2026-08-30 | Appendix C: Added change log entries | Document all edits made in this batch | Owner |
+| 2026-08-30 | §25, §28.9: added the `sim/` package — a calibrated demand simulator with an explicit module spec | §18.1 required a simulator and §19.1 assumed one, but no module existed in the layout and no spec said what it must do. Delhi publishes no occupancy and no Indian agency does, so the deployment target is undemonstrable without it | Owner |
+| 2026-08-30 | §28.9: simulator parameters must be **measured from a real corpus**, not chosen; calibration must deduplicate on `(vehicle_id, vehicle_ts)` first | Invented multipliers are indistinguishable from making the data up. Fitting on the raw corpus would triple-count the 2026-08-28→08-30 window where three recorders ran concurrently, biasing every fitted parameter | Owner |
+| 2026-08-30 | §31: added **Slice H — Delhi demo substrate**, explicitly parallel to B/C and explicitly barred from producing headline accuracy numbers | Keeps the simulator off the critical path of the actual product, and prevents a model trained and evaluated on synthetic labels from being quoted as a result | Owner |
+| 2026-08-30 | §19.1: the demo is now **two cities with two jobs** — Delhi demonstrates, Boston evidences | Answers "why American data?" honestly while keeping the accuracy claim attached to the only real occupancy labels that exist in the project | Owner |
+
+| 2026-08-30 | §29.4: added `UNAUTHORIZED` and `FORBIDDEN` error codes | Auth failures were serializing as `INTERNAL`, so a client could not distinguish "log in again" from "the server broke". Both are ordinary outcomes of a role-gated API and need their own codes | Owner |
+
+| 2026-08-30 | §25: added `scripts/demo.sh` | The demo took six manual steps, each with an environment trap (Windows interpreter, WSLENV, running from `src/`, a 25 s health wait). A demo that cannot be started reliably is not a demo | Owner |
+
+| 2026-08-30 | §12.1, §29.6: added `GET /v1/trips/{tripId}` returning origin, destination and the ordered stop path | Tapping a vehicle could show its position but not where it was going. The client had filled the gap with a hardcoded polyline, which drew the same route for every journey | Owner |
 
 > **To propose a change:** add a row here with the date, the change, the rationale and a blank
 > Approved column; edit the relevant section; and raise it with the project owner. Do not write
