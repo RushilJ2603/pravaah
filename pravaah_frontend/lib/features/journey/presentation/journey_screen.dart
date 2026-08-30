@@ -25,6 +25,10 @@ class _JourneyScreenState extends ConsumerState<JourneyScreen> {
   /// from there, so this screen never hand-rolls a spinner again.
   PlanQuery? _query;
 
+  /// The option the user tapped. The active view draws this exact journey, so
+  /// it has to survive the transition -- it used to be discarded.
+  JourneyOption? _activeOption;
+
   final TextEditingController _originController = TextEditingController();
   final TextEditingController _destController = TextEditingController();
 
@@ -62,13 +66,17 @@ class _JourneyScreenState extends ConsumerState<JourneyScreen> {
     });
   }
 
-  void _startJourney() {
-    setState(() => _currentState = JourneyState.active);
+  void _startJourney(JourneyOption option) {
+    setState(() {
+      _activeOption = option;
+      _currentState = JourneyState.active;
+    });
   }
 
   void _endJourney() {
     setState(() {
       _currentState = JourneyState.initial;
+      _activeOption = null;
       _originController.clear();
       _destController.clear();
     });
@@ -281,7 +289,7 @@ class _JourneyScreenState extends ConsumerState<JourneyScreen> {
   Widget _buildOptionCard(JourneyOption option) {
     final crowd = option.boardingCrowd;
     return GestureDetector(
-      onTap: _startJourney,
+      onTap: () => _startJourney(option),
       child: Container(
         margin: const EdgeInsets.only(bottom: 16),
         padding: const EdgeInsets.all(16),
@@ -530,6 +538,12 @@ class _JourneyScreenState extends ConsumerState<JourneyScreen> {
   }
 
   Widget _buildActiveMode() {
+    // _startJourney sets these together; the active view is the selected
+    // journey, so there is nothing to draw without it.
+    final query = _query;
+    final option = _activeOption;
+    if (query == null || option == null) return const SizedBox.shrink();
+
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
@@ -588,9 +602,9 @@ class _JourneyScreenState extends ConsumerState<JourneyScreen> {
                 ],
               ),
               const SizedBox(height: 16),
-              const Text(
-                'Route 543',
-                style: TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.w900, letterSpacing: -0.5),
+              Text(
+                option.routeLabel,
+                style: const TextStyle(color: Colors.white, fontSize: 28, fontWeight: FontWeight.w900, letterSpacing: -0.5),
               ),
               const SizedBox(height: 2),
               Row(
@@ -599,7 +613,7 @@ class _JourneyScreenState extends ConsumerState<JourneyScreen> {
                   const SizedBox(width: 6),
                   Expanded(
                     child: Text(
-                      _destController.text.isNotEmpty ? _destController.text : "Anand Vihar ISBT",
+                      query.destination.name,
                       style: TextStyle(color: Colors.white.withAlpha(220), fontSize: 15, fontWeight: FontWeight.w500),
                       overflow: TextOverflow.ellipsis,
                     ),
@@ -640,10 +654,14 @@ class _JourneyScreenState extends ConsumerState<JourneyScreen> {
         const SizedBox(height: 24),
 
         // Embed the Map View
-        const SizedBox(
+        SizedBox(
           height: 250,
           width: double.infinity,
-          child: JourneyLiveMap(),
+          child: JourneyLiveMap(
+            origin: query.origin,
+            destination: query.destination,
+            option: option,
+          ),
         ),
         const SizedBox(height: 28),
 
@@ -666,17 +684,62 @@ class _JourneyScreenState extends ConsumerState<JourneyScreen> {
           ),
           child: Column(
             children: [
-              _buildPremiumStop('Connaught Place', '12:00', 'Departed', true, false, null),
-              // Rule 2 explicitly shown: p10-p90 uncertainty band for forecasts
-              _buildPremiumStop('India Gate', '12:05', 'Live ETA', false, true, _buildCrowdIndicator('CRUSHED_STANDING_ROOM_ONLY', '80-100% full (p10-p90)')), 
-              // Rule 1 explicitly shown: Unknown is never empty.
-              _buildPremiumStop('Nizamuddin', '12:15', 'Scheduled', false, false, _buildCrowdIndicator('UNKNOWN', 'No forecast data')),
-              _buildPremiumStop(_destController.text.isNotEmpty ? _destController.text : 'Anand Vihar ISBT', '12:42', 'Scheduled', false, false, null, isLast: true),
+              ..._buildProgressStops(option),
             ],
           ),
         ),
       ],
     );
+  }
+
+  static String _hhmm(DateTime t) {
+    final local = t.toLocal();
+    return '${local.hour.toString().padLeft(2, '0')}:'
+        '${local.minute.toString().padLeft(2, '0')}';
+  }
+
+  /// The timeline of the journey the user selected: board the first leg, change
+  /// at each transfer, arrive at the last alight. Every stop name, time and
+  /// crowd band here comes from `/v1/plan`.
+  ///
+  /// Nothing is marked as already departed -- the app has no fix on where the
+  /// passenger is along the trip, and claiming otherwise would be a guess
+  /// dressed as tracking.
+  List<Widget> _buildProgressStops(JourneyOption option) {
+    final legs = option.legs;
+    if (legs.isEmpty) return const [];
+
+    return [
+      for (var i = 0; i < legs.length; i++)
+        _buildPremiumStop(
+          legs[i].boardStopName,
+          _hhmm(legs[i].departure),
+          i == 0 ? 'Board' : 'Change',
+          false,
+          i == 0,
+          _buildBandIndicator(legs[i].crowd),
+        ),
+      _buildPremiumStop(
+        legs.last.alightStopName,
+        _hhmm(legs.last.arrival),
+        'Arrive',
+        false,
+        false,
+        null,
+        isLast: true,
+      ),
+    ];
+  }
+
+  /// A forecast is a band, not a number: an unknown one still renders, and a
+  /// known one is shown p10-p90 with the fallback disclosed.
+  Widget _buildBandIndicator(CrowdBand band) {
+    if (!band.isKnown) return _buildCrowdIndicator('UNKNOWN', 'No forecast data');
+    final detail = band.p10Onboard != null && band.capacity != null
+        ? '${band.p10Onboard}-${band.p90Onboard} of ${band.capacity} onboard'
+            '${band.isFallback ? ' · estimated from history' : ''}'
+        : band.summary;
+    return _buildCrowdIndicator(band.p50.wire, detail);
   }
 
   Widget _buildCrowdIndicator(String occupancyClass, String forecastData) {

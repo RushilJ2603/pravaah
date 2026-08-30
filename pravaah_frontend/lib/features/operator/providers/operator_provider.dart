@@ -18,8 +18,12 @@ String _requireToken(Ref ref) {
 }
 
 /// Predicted crowding hotspots, ranked by severity then urgency.
-final hotspotsProvider =
-    FutureProvider.family<HotspotsResponse, int>((ref, horizonMin) async {
+///
+/// Polled slower than the fleet: this is a forecast over a horizon, so it moves
+/// on the order of minutes, not seconds.
+final hotspotsProvider = FutureProvider.autoDispose
+    .family<HotspotsResponse, int>((ref, horizonMin) async {
+  pollEvery(ref, const Duration(seconds: 30));
   final json = await ref.read(apiClientProvider).getJson(
         '/v1/admin/hotspots',
         query: {'horizon_min': '$horizonMin', 'limit': '20'},
@@ -28,8 +32,9 @@ final hotspotsProvider =
   return HotspotsResponse.fromJson(json);
 });
 
-/// Feed freshness and coverage.
-final dataHealthProvider = FutureProvider<DataHealth>((ref) async {
+/// Feed freshness and coverage. Stale by definition if it is not re-read.
+final dataHealthProvider = FutureProvider.autoDispose<DataHealth>((ref) async {
+  pollEvery(ref, const Duration(seconds: 10));
   final json = await ref.read(apiClientProvider).getJson(
         '/v1/admin/data-health',
         bearerToken: _requireToken(ref),
@@ -39,7 +44,9 @@ final dataHealthProvider = FutureProvider<DataHealth>((ref) async {
 
 /// The whole fleet. This is the one endpoint allowed to skip a viewport --
 /// an operator sees the network, a passenger sees their surroundings.
-final fleetProvider = FutureProvider<VehiclesResponse>((ref) async {
+final fleetProvider =
+    FutureProvider.autoDispose<VehiclesResponse>((ref) async {
+  pollEvery(ref, const Duration(seconds: 5));
   final json = await ref.read(apiClientProvider).getJson(
         '/v1/admin/vehicles',
         query: {'limit': '500'},
@@ -48,7 +55,8 @@ final fleetProvider = FutureProvider<VehiclesResponse>((ref) async {
   return VehiclesResponse.fromJson(json);
 });
 
-/// Hour-by-hour predicted load for one route.
+/// Hour-by-hour predicted load for one route. Not polled: the horizon is
+/// twelve hours, so re-reading it on a timer would buy nothing.
 final routeForecastProvider =
     FutureProvider.family<List<RouteHourForecast>, String>((ref, routeId) async {
   final json = await ref.read(apiClientProvider).getJson(

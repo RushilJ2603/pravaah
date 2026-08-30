@@ -228,6 +228,10 @@ class _MiniLiveMapState extends ConsumerState<MiniLiveMap> {
     setState(() => _selectedTripId = tripId);
     showModalBottomSheet<void>(
       context: context,
+      // The dashboard sits in a StatefulShellRoute branch with its own
+      // Navigator. Without this the sheet is pushed onto that branch and the
+      // shell's nav bar paints straight over it.
+      useRootNavigator: true,
       showDragHandle: true,
       builder: (context) => _VehicleDetailSheet(vehicle: v),
     ).whenComplete(() {
