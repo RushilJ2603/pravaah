@@ -19,30 +19,20 @@ class DashboardScreen extends StatelessWidget {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     // Header
-                    Row(
-                      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Image.asset(
-                              'assets/images/logo_full.png',
-                              height: 32,
-                            ),
-                            const SizedBox(height: 8),
-                            Text(
-                              'Where to go?',
-                              style: Theme.of(context).textTheme.headlineMedium?.copyWith(
-                                fontWeight: FontWeight.bold,
-                                color: AppTheme.primaryBlue,
-                              ),
-                            ),
-                          ],
+                        Image.asset(
+                          'assets/images/logo_full.png',
+                          height: 32,
                         ),
-                        const CircleAvatar(
-                          radius: 24,
-                          backgroundColor: Colors.grey,
-                          child: Icon(Icons.person, color: Colors.white),
+                        const SizedBox(height: 8),
+                        Text(
+                          'Where to go?',
+                          style: Theme.of(context).textTheme.headlineMedium?.copyWith(
+                            fontWeight: FontWeight.bold,
+                            color: AppTheme.primaryBlue,
+                          ),
                         ),
                       ],
                     ),
