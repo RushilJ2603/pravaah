@@ -1,49 +1,50 @@
 # PROJECT_STATE.md
 # ── Living State Document — Update Every Session ────────────────
-# Last Updated: 2026-08-30 09:05 IST | By: AI (Claude Opus 5)
+# Last Updated: 2026-08-30 09:45 IST | By: AI (Claude Opus 5)
 
 ## Current Phase
-**Phase P0 — Data foundation: COMPLETE.** P0.1 (contracts + config), P0.2 (schema + compose
-stack), P0.3 (GTFS importer) and P0.4 (CSV → Parquet conversion) are all built and their
-acceptance gates verified. Next phase is **P1 — Live fleet**.
+**Slice A — "It is alive".** A.1 (adapters), A.2 (validation + Redis state) and A.3 (read-only
+API + ingestion worker) are built and gated. **A.4 (frontend live map) and A.5 (deploy) remain.**
+Slice 0 / phase P0 is complete. Build order is now the vertical slices in SOLUTION.md §31.
 
 ## Current Status
-**56 tests pass (53 unit + 3 corpus integration + 3 database integration), ruff clean.**
+**106 unit tests pass, plus integration suites; ruff clean.** Pushed to
+**https://github.com/RushilJ2603/pravaah** (private, 10 commits, created 2026-08-30).
 
-P0.4 landed: `ingest/convert.py` streams the recorder CSVs into date-partitioned Parquet.
-Measured on the real corpus — TripUpdates 10,854,177 rows in → 3,917,785 out (**63.9% duplicates
-dropped**), 0.91 GB → 0.02 GB; VehiclePositions 2,889,716 rows, 0.43 GB → 0.03 GB. 76 malformed
-rows skipped across both (0.0004% and 0.0011%, both far under the 0.1% ceiling). Peak RSS within
-the 1 GB budget. **1.34 GB of CSV now reads as 0.05 GB of Parquet.**
+Running infrastructure: Compose stack up — TimescaleDB + PostGIS on **host port 15432** and
+Redis on 6379, both healthy. MBTA GTFS imported as **feed_version_id 5** (399 routes, 9,630
+routable stops, 89,080 trips, 2,221,062 stop-times).
 
-A data-integrity problem was found and stopped: **three `record_feed.py` processes were appending
-to the same two CSVs concurrently**, multiply-recording every observation and interleaving
-mid-row to produce torn lines. PIDs 52120 and 66296 were stopped with the owner's approval;
-**PID 39404 (running since 2026-08-28 19:33) continues uninterrupted.**
+Built this session beyond Slice 0: the GTFS-Realtime adapter chain producing canonical events
+(291 vehicles, 60.8% occupancy coverage, 0 skipped, mean quality 0.979 on a live poll); the
+position validator with derived speed and machine-readable rejection reasons; Redis latest-state
+with viewport queries (read p95 **0.85 ms**); the read-only passenger API; and the
+poll-validate-store worker that keeps live state moving.
 
-Two document amendments were made this session, both approved before any code changed and both
-logged in Appendix C: the stop-count gate (§6.2.1/§28.1/§31), and the malformed-row policy
-plus single-writer requirement (§28.2/§31).
+The document was amended five times this session, each approved before any code changed and each
+logged in Appendix C: the stop-count gate, the malformed-row policy, the vertical-slice
+restructure of §31, the §33 frontend specification, §14.4 deployment, and the `GET /v1/vehicles`
+viewport endpoint.
 
-Not started: adapters, map matching, state, features, models, routing, API, frontend.
+Not started: frontend (§33), deployment (§14.4), forecasting, routing, operator dashboard.
 
 ## Blocking Issues
 - NONE blocking the build.
-- **Watch item — port 5432 is taken on this machine.** An unrelated container (`postgres-db`,
-  image `postgres:16`) already publishes `0.0.0.0:5432`. Docker **silently declines** to publish
-  a taken port, so our stack looked healthy while clients reached the *other* server and failed
-  authentication. `docker-compose.yml` therefore publishes **15432**. Consequence: the compose
-  host port (15432) and the DSN documented in SOLUTION.md §30.2 (`localhost:5432`) now disagree —
-  see Known Issues.
+- **Watch item:** two tests in `tests/integration/test_api.py` still **skip** —
+  `/v1/stops/{id}/departures` is not verified end to end even though feed_version_id 5 is
+  imported. Diagnose before trusting that endpoint. It is the only part of A.3 not proven.
 
 ## Next Session Must Start With
-> Begin **P1 — Live fleet**, starting with P1.1: `adapters/base.py`, `adapters/gtfs_rt.py` and
-> `adapters/mbta.py` per SOLUTION.md §25 and §28. The adapter converts GTFS-Realtime protobuf
-> into `VehiclePositionEvent` (already defined and tested in `contracts/events.py`). Gate: a live
-> poll produces valid events and **zero records lack provenance**.
-> Two constraints the contracts already enforce, so do not fight them: adapters must leave
-> `speed_mps` as None (it is derived later, §28.4), and a missing `occupancy_status` maps to
-> `OccupancyClass.UNKNOWN`, never `EMPTY`.
+> First, resolve the two skipped tests in `tests/integration/test_api.py` — run with
+> `PRAVAAH_DATABASE_DSN="postgresql://pravaah:pravaah@localhost:15432/pravaah"` and find why the
+> departures endpoint returns 503/404 when feed_version_id 5 exists. It is a small bug, and A.3
+> is not honestly complete until it passes.
+>
+> Then build **Slice A.4**: the React + Vite + MapLibre live map per SOLUTION.md §33, with a
+> **self-hosted Protomaps `.pmtiles` basemap for Boston** (approved — no API key, works offline,
+> so §31 F.4 survives). Put the extract in `deploy/basemap/` and git-ignore it.
+> Gate: vehicles move on the correct routes; a stale feed shows the freshness badge; an unknown
+> occupancy never renders as empty (§33.3). Then **A.5**: deploy per §14.4.
 
 ## Environment Notes
 - OS: Windows 11 Home Single Language 10.0.26200
@@ -53,6 +54,11 @@ Not started: adapters, map matching, state, features, models, routing, API, fron
 - Node: v24.15.0 (unused until P4).
 - Docker: 29.5.3, daemon running. `docker compose up -d` brings up `sih-db-1`
   (timescale/timescaledb-ha:pg16, PostgreSQL 16.14) and `sih-redis-1`, both healthy.
+- Git remote: `origin` -> https://github.com/RushilJ2603/pravaah (**private**). Authenticated as
+  **RushilJ2603**, which is a teammate's account, not this session's email. Commit messages carry
+  **no AI co-author trailer** by the owner's instruction — do not re-add one.
+- Python packages added this session: `psycopg[binary]`, `psycopg-pool`, `redis`, `fastapi`,
+  `uvicorn`, `httpx`, `pandas`, `pyarrow`, `numpy`, `ruff`, `pytest`.
 - **DB: reachable on host port 15432, NOT 5432.** Run tests with:
   `PRAVAAH_DATABASE_DSN="postgresql://pravaah:pravaah@localhost:15432/pravaah" python -m pytest tests -q`
   Migrations apply automatically on first boot of an empty volume; `docker compose down -v` to reset.
@@ -79,6 +85,10 @@ Not started: adapters, map matching, state, features, models, routing, API, fron
 | Forecasts are quantiles (p10/p50/p90), never point estimates | Calibration is a KPI; uncertainty is a pitch differentiator. | 2026-08-27 |
 
 ## Known Issues / Tech Debt
+- **Recorder: exactly ONE process must run.** Three were found running concurrently this
+  session (PIDs 39404, 52120, 66296); two were stopped. Before any long capture, check with
+  `Get-CimInstance Win32_Process -Filter "Name='python.exe'"` and confirm a single
+  `record_feed.py`. Concurrent writers interleave mid-row and corrupt the CSV.
 - **The recorded corpus is multiply-written for 2026-08-28 → 08-30.** Three recorders ran
   concurrently, so vehicle-position rows repeat with the same `vehicle_ts` under different
   `ingest_ts` (~2.89M rows recorded where one process logged ~1.27M). The converter deliberately

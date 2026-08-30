@@ -16,6 +16,51 @@
 #
 # ──────────────────────────────────────────────────────────────
 
+## [2026-08-30 09:45 IST] — Slice A.1–A.3 built; pushed to a private GitHub repo | By: AI
+
+### Done This Session
+- **Slice A.1 — adapters.** `adapters/base.py` separates fetch from decode so the mapping is
+  testable offline and a recorded `.pb` frame replays through the same path as a live poll.
+  `gtfs_rt.py` enforces two document rules at the boundary: `speed_mps` is left None (§28.4) and
+  absent occupancy becomes `UNKNOWN`, never `EMPTY` (§12.4 rule 3). Live poll measured: **291
+  vehicles, 60.8% occupancy coverage, 0 skipped entities, mean quality 0.979.**
+- **Slice A.2 — validation and state.** `ingest/validate.py` gives three distinct outcomes:
+  accepted with derived speed, rejected with a machine-readable reason, or accepted-but-flagged
+  stale. Rejects out-of-bounds, impossible speed, null island `(0,0)` and re-served timestamps.
+  `state/redis_state.py` holds only reconstructible state, with a geo set for viewport queries.
+  **Latest-state read p95 measured at 0.85 ms** against the 5 ms budget.
+- **Slice A.3 — API and worker.** `GET /v1/vehicles` (bbox required), `/v1/vehicles/{id}`,
+  `/v1/stops/{id}/departures`, `/v1/health`, plus the poll-validate-store worker. `age_s` and
+  `is_stale` are always present so a client renders the freshness badge without computing clock
+  skew; `occupancy_class` is always present and `UNKNOWN` with a null ratio when nothing was
+  reported.
+- **Five approved document amendments** (Appendix C), each made before the corresponding code:
+  §31 restructured into vertical slices, §33 frontend specification added, §14.4 single-VM
+  deployment added, `GET /v1/vehicles` added to §12.1/§29.2, and earlier the stop-count gate
+  and malformed-row policy.
+- **Imported the MBTA network** into the running database as feed_version_id 5.
+- **Pushed to https://github.com/RushilJ2603/pravaah** — private, 10 commits, repo created today.
+  Rewrote history first to strip the AI co-author trailer from every commit, then dropped the
+  filter-branch backup refs and verified 0 trailers remain across all refs.
+- **106 unit tests pass** plus integration suites; ruff clean.
+
+### Errors Hit
+- **A `location_type=3` discovery cascade.** Slice A revealed nothing new here, but earlier in the
+  session the P0.3 gate failure led to the stop-count amendment — see the 09:05 entry.
+- **Two API tests still skip.** `/v1/stops/{id}/departures` is not verified end to end even with
+  feed_version_id 5 imported. **Unresolved — first task next session.**
+- **Filter-branch verification nearly gave a false negative.** `git log --all` includes
+  `refs/original/`, so the first trailer check reported 10 remaining when the branch was already
+  clean. Verified against the branch, then expired the backups and rechecked across all refs.
+
+### Next Session Must
+- Fix the two skipped departures tests; A.3 is not honestly complete until they pass.
+- Build **Slice A.4**: React + Vite + MapLibre live map per §33, with a self-hosted Protomaps
+  `.pmtiles` Boston basemap (no API key, offline-capable, so §31 F.4 survives).
+- Then **A.5**: deploy to a single VM per §14.4.
+
+---
+
 ## [2026-08-30 09:05 IST] — P0.4 complete; three concurrent recorders found and stopped | By: AI
 
 ### Done This Session
