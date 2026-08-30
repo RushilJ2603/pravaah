@@ -435,17 +435,64 @@ class _JourneyScreenState extends ConsumerState<JourneyScreen> {
     }
   }
 
-  Widget _buildLocationInput(IconData icon, String hint, Color iconColor, TextEditingController controller) {
+  /// Origin/destination field with suggestions.
+  ///
+  /// `/v1/plan` takes coordinates, so free text has to resolve to a known
+  /// place. Typing "con" offers Connaught Place; selecting it pins the exact
+  /// coordinates rather than guessing from a string later.
+  Widget _buildLocationInput(IconData icon, String hint, Color iconColor,
+      TextEditingController controller) {
     return Row(
       children: [
         Icon(icon, color: iconColor),
         const SizedBox(width: 16),
         Expanded(
-          child: TextField(
-            controller: controller,
-            decoration: InputDecoration(
-              hintText: hint,
-              border: InputBorder.none,
+          child: Autocomplete<DelhiPlace>(
+            displayStringForOption: (place) => place.name,
+            optionsBuilder: (value) => searchPlaces(value.text).take(6),
+            onSelected: (place) => controller.text = place.name,
+            fieldViewBuilder: (context, textController, focusNode, onSubmitted) {
+              // Keep the outer controller authoritative so _handleSearch and
+              // "clear" keep working, but let Autocomplete drive the field.
+              if (textController.text != controller.text &&
+                  !focusNode.hasFocus) {
+                textController.text = controller.text;
+              }
+              textController.addListener(() => controller.text = textController.text);
+              return TextField(
+                controller: textController,
+                focusNode: focusNode,
+                onSubmitted: (_) => onSubmitted(),
+                decoration: InputDecoration(
+                  hintText: hint,
+                  border: InputBorder.none,
+                ),
+              );
+            },
+            optionsViewBuilder: (context, onSelected, options) => Align(
+              alignment: Alignment.topLeft,
+              child: Material(
+                elevation: 4,
+                borderRadius: BorderRadius.circular(12),
+                child: ConstrainedBox(
+                  constraints: const BoxConstraints(maxHeight: 240, maxWidth: 320),
+                  child: ListView.builder(
+                    padding: EdgeInsets.zero,
+                    shrinkWrap: true,
+                    itemCount: options.length,
+                    itemBuilder: (context, index) {
+                      final place = options.elementAt(index);
+                      return ListTile(
+                        dense: true,
+                        leading: const Icon(Icons.place_outlined, size: 18),
+                        title: Text(place.name,
+                            style: const TextStyle(fontSize: 14)),
+                        onTap: () => onSelected(place),
+                      );
+                    },
+                  ),
+                ),
+              ),
             ),
           ),
         ),
@@ -564,45 +611,30 @@ class _JourneyScreenState extends ConsumerState<JourneyScreen> {
         ),
         const SizedBox(height: 16),
 
-        // RULE 6: SIMULATED DATA BANNER (Must be unmissable but premium)
-        Container(
-          width: double.infinity,
-          padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 20),
-          decoration: BoxDecoration(
-            color: Colors.orange.shade50,
-            borderRadius: BorderRadius.circular(20),
-            border: Border.all(color: Colors.orange.shade200, width: 1.5),
-          ),
-          child: Row(
-            children: [
-              Container(
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(color: Colors.orange.shade100, shape: BoxShape.circle),
-                child: Icon(Icons.science_rounded, color: Colors.orange.shade800, size: 24),
-              ),
-              const SizedBox(width: 16),
-              Expanded(
-                child: Column(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Text(
-                      'SIMULATED DATA (DEMO)',
-                      style: TextStyle(
-                        color: Colors.orange.shade900,
-                        fontWeight: FontWeight.w900,
-                        letterSpacing: 0.5,
-                        fontSize: 14,
-                      ),
-                    ),
-                    const SizedBox(height: 2),
-                    Text(
-                      'Synthetic network traffic, not real Delhi data.',
-                      style: TextStyle(color: Colors.orange.shade700, fontSize: 13, fontWeight: FontWeight.w500),
-                    ),
-                  ],
-                ),
-              ),
-            ],
+        // Rule 6 still applies -- synthetic data must not be presented as real
+        // operator data -- but it does not need a full-width slab on the main
+        // journey screen. A compact tag reads as a product label, not a warning.
+        Align(
+          alignment: Alignment.centerLeft,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+            decoration: BoxDecoration(
+              color: AppTheme.textSecondary.withAlpha(20),
+              borderRadius: BorderRadius.circular(20),
+            ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(Icons.science_outlined,
+                    size: 13, color: AppTheme.textSecondary),
+                const SizedBox(width: 5),
+                Text('Simulated data',
+                    style: TextStyle(
+                        color: AppTheme.textSecondary,
+                        fontSize: 11,
+                        fontWeight: FontWeight.w500)),
+              ],
+            ),
           ),
         ),
         const SizedBox(height: 24),
