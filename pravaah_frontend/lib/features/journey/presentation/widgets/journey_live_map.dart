@@ -1,28 +1,107 @@
+import 'dart:convert';
 import 'package:flutter/material.dart';
+import 'package:http/http.dart' as http;
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../../theme/app_theme.dart';
 import '../../data/mock_route_geometry.dart';
+import 'package:pravaah_api/api.dart';
+import '../../../dashboard/providers/vehicle_provider.dart';
+import '../../../../core/api/places.dart';
 
-class JourneyLiveMap extends StatefulWidget {
-  const JourneyLiveMap({super.key});
+class JourneyLiveMap extends ConsumerStatefulWidget {
+  final JourneyOption option;
+  final DelhiPlace? originPlace;
+  final DelhiPlace? destPlace;
+  
+  const JourneyLiveMap({super.key, required this.option, this.originPlace, this.destPlace});
 
   @override
-  State<JourneyLiveMap> createState() => _JourneyLiveMapState();
+  ConsumerState<JourneyLiveMap> createState() => _JourneyLiveMapState();
 }
 
-class _JourneyLiveMapState extends State<JourneyLiveMap> {
+class _JourneyLiveMapState extends ConsumerState<JourneyLiveMap> {
   final MapController _mapController = MapController();
   
-  // Mock Data from real road geometry
-  final LatLng _source = mockRouteGeometry.first; // Connaught Place Area
-  final LatLng _dest = mockRouteGeometry.last; // Anand Vihar Area
-  final LatLng _busLocation = mockRouteGeometry[mockRouteGeometry.length ~/ 2]; // Midpoint on the actual road
-  
   bool _isBusSelected = false;
+  List<LatLng> _routeGeometry = [];
+  bool _isLoadingRoute = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _fetchRouteGeometry();
+  }
+
+  @override
+  void didUpdateWidget(JourneyLiveMap oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (oldWidget.originPlace?.name != widget.originPlace?.name ||
+        oldWidget.destPlace?.name != widget.destPlace?.name) {
+      _fetchRouteGeometry();
+    }
+  }
+
+  Future<void> _fetchRouteGeometry() async {
+    if (widget.originPlace == null || widget.destPlace == null) return;
+    
+    setState(() {
+      _isLoadingRoute = true;
+    });
+
+    try {
+      final url = Uri.parse(
+          'http://router.project-osrm.org/route/v1/driving/${widget.originPlace!.lon},${widget.originPlace!.lat};${widget.destPlace!.lon},${widget.destPlace!.lat}?overview=full&geometries=geojson');
+      final response = await http.get(url);
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        final coordinates = data['routes'][0]['geometry']['coordinates'] as List;
+        
+        final List<LatLng> points = coordinates.map((coord) {
+          return LatLng(coord[1].toDouble(), coord[0].toDouble());
+        }).toList();
+        
+        if (mounted) {
+          setState(() {
+            _routeGeometry = points;
+            _isLoadingRoute = false;
+          });
+        }
+      }
+    } catch (e) {
+      if (mounted) {
+        setState(() {
+          _isLoadingRoute = false;
+        });
+      }
+    }
+  }
 
   @override
   Widget build(BuildContext context) {
+    final routeId = widget.option.legs.isNotEmpty ? widget.option.legs.first.routeId : 'Walk';
+    
+    // Fetch live vehicles for Delhi bounding box
+    final vehiclesAsync = ref.watch(vehicleProvider("28.40,76.80,28.90,77.50"));
+    
+    VehicleView? activeVehicle;
+    vehiclesAsync.whenData((fleet) {
+      try {
+        activeVehicle = fleet.vehicles.firstWhere((v) => v.routeId == routeId);
+      } catch (_) {
+        activeVehicle = null;
+      }
+    });
+
+    LatLng busLoc;
+    if (activeVehicle != null) {
+      busLoc = LatLng(activeVehicle!.lat.toDouble(), activeVehicle!.lon.toDouble());
+    } else if (_routeGeometry.isNotEmpty) {
+      busLoc = _routeGeometry[_routeGeometry.length ~/ 2];
+    } else {
+      busLoc = mockRouteGeometry[mockRouteGeometry.length ~/ 2];
+    }
     return ClipRRect(
       borderRadius: BorderRadius.circular(24),
       child: Stack(
@@ -44,7 +123,7 @@ class _JourneyLiveMapState extends State<JourneyLiveMap> {
               PolylineLayer(
                 polylines: [
                   Polyline(
-                    points: mockRouteGeometry,
+                    points: _routeGeometry.isNotEmpty ? _routeGeometry : mockRouteGeometry,
                     color: AppTheme.primaryBlue.withAlpha(200),
                     strokeWidth: 4.0,
                   ),
@@ -53,22 +132,25 @@ class _JourneyLiveMapState extends State<JourneyLiveMap> {
               MarkerLayer(
                 markers: [
                   // Source
+                  if (widget.originPlace != null)
                   Marker(
-                    point: _source,
+                    point: LatLng(widget.originPlace!.lat, widget.originPlace!.lon),
                     width: 30,
                     height: 30,
                     child: _buildStopMarker(Colors.blue, Icons.my_location),
                   ),
                   // Destination
+                  if (widget.destPlace != null)
                   Marker(
-                    point: _dest,
+                    point: LatLng(widget.destPlace!.lat, widget.destPlace!.lon),
                     width: 30,
                     height: 30,
                     child: _buildStopMarker(Colors.redAccent, Icons.location_on),
                   ),
                   // Live Bus
+                  if (activeVehicle != null || _routeGeometry.isNotEmpty || routeId == 'Walk')
                   Marker(
-                    point: _busLocation,
+                    point: busLoc,
                     width: 50,
                     height: 50,
                     child: GestureDetector(
@@ -91,7 +173,7 @@ class _JourneyLiveMapState extends State<JourneyLiveMap> {
               bottom: 16,
               left: 16,
               right: 16,
-              child: _buildBusDataCard(),
+              child: _buildBusDataCard(activeVehicle, routeId),
             ),
             
           // Recenter Button
@@ -104,7 +186,11 @@ class _JourneyLiveMapState extends State<JourneyLiveMap> {
               foregroundColor: AppTheme.primaryBlue,
               elevation: 4,
               onPressed: () {
-                _mapController.move(const LatLng(28.6250, 77.2600), 12.5);
+                if (widget.originPlace != null) {
+                  _mapController.move(LatLng(widget.originPlace!.lat, widget.originPlace!.lon), 12.5);
+                } else {
+                  _mapController.move(const LatLng(28.6250, 77.2600), 12.5);
+                }
               },
               child: const Icon(Icons.center_focus_strong),
             ),
@@ -145,7 +231,7 @@ class _JourneyLiveMapState extends State<JourneyLiveMap> {
     );
   }
 
-  Widget _buildBusDataCard() {
+  Widget _buildBusDataCard(VehicleView? vehicle, String routeId) {
     return AnimatedOpacity(
       opacity: 1.0,
       duration: const Duration(milliseconds: 300),
@@ -166,9 +252,9 @@ class _JourneyLiveMapState extends State<JourneyLiveMap> {
             Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                const Text(
-                  'Vehicle DL0181',
-                  style: TextStyle(fontWeight: FontWeight.w900, fontSize: 16, color: AppTheme.textPrimary),
+                Text(
+                  vehicle != null ? 'Vehicle ${vehicle.vehicleId}' : 'Vehicle for $routeId',
+                  style: const TextStyle(fontWeight: FontWeight.w900, fontSize: 16, color: AppTheme.textPrimary),
                 ),
                 GestureDetector(
                   onTap: () => setState(() => _isBusSelected = false),
@@ -190,19 +276,19 @@ class _JourneyLiveMapState extends State<JourneyLiveMap> {
                   Icon(Icons.groups_rounded, size: 14, color: Colors.red.shade700),
                   const SizedBox(width: 4),
                   Text(
-                    'Crush Load (85% Capacity)',
+                    vehicle != null ? 'Live Data (${vehicle.occupancyClass.toString().split('.').last})' : 'Crush Load (85% Capacity)',
                     style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: Colors.red.shade700),
                   ),
                 ],
               ),
             ),
             const SizedBox(height: 12),
-            const Row(
+            Row(
               mainAxisAlignment: MainAxisAlignment.spaceBetween,
               children: [
-                _DataPoint(label: 'Speed', value: '24 km/h'),
-                _DataPoint(label: 'Next Stop', value: 'India Gate'),
-                _DataPoint(label: 'Data Age', value: '12s'),
+                _DataPoint(label: 'Speed', value: vehicle?.speedMps != null ? '${(vehicle!.speedMps! * 3.6).toStringAsFixed(1)} km/h' : '24 km/h'),
+                _DataPoint(label: 'Next Stop', value: vehicle?.stopId ?? 'Unknown'),
+                _DataPoint(label: 'Data Age', value: vehicle != null ? '${vehicle.ageS}s' : '12s'),
               ],
             ),
           ],

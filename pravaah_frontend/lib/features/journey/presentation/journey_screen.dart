@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:pravaah_api/api.dart';
 import '../../../../theme/app_theme.dart';
 import '../../../core/api_provider.dart';
+import '../../../core/api/places.dart';
 import 'widgets/journey_live_map.dart';
 import 'package:intl/intl.dart';
 
@@ -22,6 +23,8 @@ class _JourneyScreenState extends ConsumerState<JourneyScreen> {
   final TextEditingController _originController = TextEditingController();
   final TextEditingController _destController = TextEditingController();
 
+  DelhiPlace? _originPlace;
+  DelhiPlace? _destPlace;
   PlanResponse? _planResponse;
   JourneyOption? _selectedOption;
 
@@ -33,15 +36,30 @@ class _JourneyScreenState extends ConsumerState<JourneyScreen> {
       return;
     }
 
-    setState(() => _currentState = JourneyState.searching);
+    final origin = findPlace(_originController.text);
+    final destination = findPlace(_destController.text);
+    
+    if (origin == null || destination == null) {
+      final unknown = origin == null ? _originController.text : _destController.text;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not find "$unknown". Try another location.')),
+      );
+      return;
+    }
+
+    setState(() {
+      _currentState = JourneyState.searching;
+      _originPlace = origin;
+      _destPlace = destination;
+    });
     
     try {
       final api = ref.read(passengerApiProvider);
       // Convert UI preference to backend expected format (e.g. "Least Crowded" -> "least_crowded")
       String apiProfile = _selectedPreference.toLowerCase().replaceAll(' ', '_');
       
-      // Hardcoded coords for MVP (Connaught Place -> Anand Vihar)
-      final response = await api.planV1PlanGet(28.633, 77.219, 28.650, 77.300, profile: apiProfile);
+      // Use dynamic coordinates from places.dart
+      final response = await api.planV1PlanGet(origin.lat, origin.lon, destination.lat, destination.lon, profile: apiProfile);
       
       if (mounted) {
         setState(() {
@@ -51,89 +69,8 @@ class _JourneyScreenState extends ConsumerState<JourneyScreen> {
       }
     } catch (e) {
       if (mounted) {
-        setState(() {
-          _planResponse = PlanResponse(
-            generatedAt: DateTime.now(),
-            cityId: 'demo-fallback',
-            profile: apiProfile,
-            options: [
-              JourneyOption(
-                optionId: 'demo-1',
-                totalMinutes: 42,
-                transfers: 0,
-                departure: DateTime.now(),
-                arrival: DateTime.now().add(const Duration(minutes: 42)),
-                score: 1.0,
-                reasons: ['FASTEST', 'DIRECT'],
-                isRecommended: true,
-                legs: [
-                  JourneyLeg(
-                    routeId: '543',
-                    routeName: 'Route 543',
-                    boardStopId: 'stop-cp',
-                    boardStopName: _originController.text.isNotEmpty ? _originController.text : 'Connaught Place',
-                    alightStopId: 'stop-av',
-                    alightStopName: _destController.text.isNotEmpty ? _destController.text : 'Anand Vihar ISBT',
-                    departure: DateTime.now(),
-                    arrival: DateTime.now().add(const Duration(minutes: 42)),
-                    stops: 8,
-                    crowd: CrowdBand(
-                      p10Class: OccupancyClass.FEW_SEATS_AVAILABLE,
-                      p50Class: OccupancyClass.STANDING_ROOM_ONLY,
-                      p90Class: OccupancyClass.FULL,
-                      capacity: 100,
-                      p10Onboard: null,
-                      p50Onboard: null,
-                      p90Onboard: null,
-                      p50Ratio: null,
-                      modelVersion: 'demo',
-                      isFallback: true,
-                    )
-                  )
-                ]
-              ),
-              JourneyOption(
-                optionId: 'demo-2',
-                totalMinutes: 55,
-                transfers: 1,
-                departure: DateTime.now().add(const Duration(minutes: 5)),
-                arrival: DateTime.now().add(const Duration(minutes: 60)),
-                score: 0.8,
-                reasons: ['LEAST_CROWDED'],
-                isRecommended: false,
-                legs: [
-                  JourneyLeg(
-                    routeId: '311',
-                    routeName: 'Route 311',
-                    boardStopId: 'stop-cp',
-                    boardStopName: _originController.text.isNotEmpty ? _originController.text : 'Connaught Place',
-                    alightStopId: 'stop-av',
-                    alightStopName: _destController.text.isNotEmpty ? _destController.text : 'Anand Vihar ISBT',
-                    departure: DateTime.now().add(const Duration(minutes: 5)),
-                    arrival: DateTime.now().add(const Duration(minutes: 60)),
-                    stops: 15,
-                    crowd: CrowdBand(
-                      p10Class: OccupancyClass.MANY_SEATS_AVAILABLE,
-                      p50Class: OccupancyClass.FEW_SEATS_AVAILABLE,
-                      p90Class: OccupancyClass.STANDING_ROOM_ONLY,
-                      capacity: 100,
-                      p10Onboard: null,
-                      p50Onboard: null,
-                      p90Onboard: null,
-                      p50Ratio: null,
-                      modelVersion: 'demo',
-                      isFallback: true,
-                    )
-                  )
-                ]
-              ),
-            ]
-          );
-          _currentState = JourneyState.results;
-        });
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('Bypassed API error with Demo routes.')),
-        );
+         ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text('Search failed: $e')));
+         setState(() => _currentState = JourneyState.initial);
       }
     }
   }
@@ -258,12 +195,29 @@ class _JourneyScreenState extends ConsumerState<JourneyScreen> {
           Text('Suggested Routes', style: Theme.of(context).textTheme.titleLarge),
           const SizedBox(height: 16),
           
-          ..._planResponse!.options.asMap().entries.map((entry) {
-            final idx = entry.key;
-            final option = entry.value;
-            // Rule 3: Ranked Options explicitly show their reason code.
-            return _buildRankedOption(option, idx == 0);
-          }),
+          ...() {
+            final sorted = List<JourneyOption>.from(_planResponse!.options);
+            if (_selectedPreference == 'Fastest') {
+              sorted.sort((a, b) => a.totalMinutes.compareTo(b.totalMinutes));
+            } else if (_selectedPreference == 'Least Crowded') {
+              sorted.sort((a, b) {
+                final aRatio = a.legs.isNotEmpty ? (a.legs.first.crowd?.p50Ratio?.toDouble() ?? 1.0) : 1.0;
+                final bRatio = b.legs.isNotEmpty ? (b.legs.first.crowd?.p50Ratio?.toDouble() ?? 1.0) : 1.0;
+                return aRatio.compareTo(bRatio);
+              });
+            } else { // Balanced: blend of time and crowd
+              sorted.sort((a, b) {
+                final aRatio = a.legs.isNotEmpty ? (a.legs.first.crowd?.p50Ratio?.toDouble() ?? 1.0) : 1.0;
+                final bRatio = b.legs.isNotEmpty ? (b.legs.first.crowd?.p50Ratio?.toDouble() ?? 1.0) : 1.0;
+                final aScore = a.totalMinutes * 0.6 + aRatio * 100 * 0.4;
+                final bScore = b.totalMinutes * 0.6 + bRatio * 100 * 0.4;
+                return aScore.compareTo(bScore);
+              });
+            }
+            return sorted.asMap().entries.map((entry) {
+              return _buildRankedOption(entry.value, entry.key == 0);
+            });
+          }(),
 
           const SizedBox(height: 16),
           SizedBox(
@@ -306,6 +260,10 @@ class _JourneyScreenState extends ConsumerState<JourneyScreen> {
       onSelected: (bool selected) {
         if (selected) {
           setState(() => _selectedPreference = label);
+          // If a search was already performed, immediately re-fetch with new profile
+          if (_originPlace != null && _destPlace != null) {
+            _handleSearch();
+          }
         }
       },
       selectedColor: AppTheme.primaryBlue.withAlpha(30),
@@ -509,10 +467,14 @@ class _JourneyScreenState extends ConsumerState<JourneyScreen> {
         const SizedBox(height: 24),
 
         // Embed the Map View
-        const SizedBox(
+        SizedBox(
           height: 250,
           width: double.infinity,
-          child: JourneyLiveMap(),
+          child: JourneyLiveMap(
+            option: option,
+            originPlace: _originPlace,
+            destPlace: _destPlace,
+          ),
         ),
         const SizedBox(height: 28),
 
