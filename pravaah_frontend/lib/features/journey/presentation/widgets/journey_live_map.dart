@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
 import 'package:latlong2/latlong.dart';
 import '../../../../theme/app_theme.dart';
+import '../../data/mock_route_geometry.dart';
 
 class JourneyLiveMap extends StatefulWidget {
   const JourneyLiveMap({super.key});
@@ -13,10 +14,10 @@ class JourneyLiveMap extends StatefulWidget {
 class _JourneyLiveMapState extends State<JourneyLiveMap> {
   final MapController _mapController = MapController();
   
-  // Mock Data
-  final LatLng _source = const LatLng(28.6315, 77.2167); // Connaught Place
-  final LatLng _dest = const LatLng(28.6500, 77.3150); // Anand Vihar
-  final LatLng _busLocation = const LatLng(28.6129, 77.2295); // India Gate
+  // Mock Data from real road geometry
+  final LatLng _source = mockRouteGeometry.first; // Connaught Place Area
+  final LatLng _dest = mockRouteGeometry.last; // Anand Vihar Area
+  final LatLng _busLocation = mockRouteGeometry[mockRouteGeometry.length ~/ 2]; // Midpoint on the actual road
   
   bool _isBusSelected = false;
 
@@ -43,21 +44,7 @@ class _JourneyLiveMapState extends State<JourneyLiveMap> {
               PolylineLayer(
                 polylines: [
                   Polyline(
-                    points: [
-                      _source,
-                      const LatLng(28.6290, 77.2230),
-                      const LatLng(28.6255, 77.2275),
-                      const LatLng(28.6180, 77.2300),
-                      _busLocation,
-                      const LatLng(28.6135, 77.2360),
-                      const LatLng(28.6200, 77.2420),
-                      const LatLng(28.6240, 77.2520),
-                      const LatLng(28.6265, 77.2650),
-                      const LatLng(28.6300, 77.2800),
-                      const LatLng(28.6350, 77.2950),
-                      const LatLng(28.6430, 77.3050),
-                      _dest,
-                    ],
+                    points: mockRouteGeometry,
                     color: AppTheme.primaryBlue.withAlpha(200),
                     strokeWidth: 4.0,
                   ),
