@@ -77,6 +77,7 @@ cannot be diffed, reviewed or version-controlled, which the rule above requires.
 30. [Configuration and city profiles](#30-configuration-and-city-profiles)
 31. [Build order with acceptance gates](#31-build-order-with-acceptance-gates)
 32. [Conventions](#32-conventions)
+33. [Frontend specification](#33-frontend-specification)
 
 **Appendices**
 - [Appendix A — Example payloads](#appendix-a--example-payloads)
@@ -832,6 +833,40 @@ data residency.
 
 ---
 
+### 14.4 Public demo deployment (single VM)
+
+The demo is served from **one cloud VM running the existing Compose stack** behind a
+TLS-terminating reverse proxy. This keeps §27 exactly as written -- PostGIS and TimescaleDB both
+work, because we control the database image -- and gives judges a single URL.
+
+```
+                    internet
+                       |
+                  Caddy :443            automatic TLS, HTTP/2
+                   /        \
+        static frontend    /api -> FastAPI :8000
+                                      |
+                          +-----------+-----------+
+                          |                       |
+                 timescaledb + postgis        redis
+                     (named volume)        (latest state)
+```
+
+| Concern | Decision |
+|---|---|
+| Host | One VM, **minimum 4 GB RAM / 2 vCPU / 40 GB disk**. The static GTFS import alone is 2.2M stop-times. |
+| TLS | Caddy, automatic certificates. No manual certificate handling. |
+| Compose | A `deploy` profile adds Caddy and the built frontend to the existing stack. The dev stack stays unchanged. |
+| Secrets | `.env` on the host only, never in the repo (§32). The database password is not the development default. |
+| Exposure | **Only 80/443 are published.** Postgres and Redis stay on the internal Compose network -- never published to the host in the deploy profile. |
+| Data | The recorded corpus is not shipped in the image. The VM imports GTFS and replays a Parquet subset. |
+| Backups | `pg_dump` on a schedule to object storage; the corpus is the irreplaceable part, not the derived tables. |
+| Cost | Sized for a free or student tier. |
+
+**The hosted deployment does not replace the offline requirement.** §19 and the hardening slice
+still require the full demo to run from recorded replay with networking disabled -- judges may
+have no connectivity, and the live feed may be down at the wrong moment. Both paths must work.
+
 ## 15. Security, privacy and governance
 
 | Area | Controls |
@@ -1155,7 +1190,17 @@ SIH/
 │   ├── unit/
 │   ├── integration/
 │   └── parity/                      ← online/offline feature parity
-├── frontend/                        ← React + MapLibre (from P4)
+├── frontend/                        ← React + Vite + MapLibre (see §33)
+│   ├── src/
+│   │   ├── api/                     ← generated client for §29 contracts
+│   │   ├── components/              ← map, option cards, forecast bands, badges
+│   │   ├── routes/                  ← live map · planner · journey · operator
+│   │   └── lib/                     ← formatting, live-update socket, state rules
+│   └── index.html
+├── deploy/
+│   ├── Caddyfile                    ← TLS + static + /api reverse proxy
+│   ├── compose.deploy.yml           ← the `deploy` profile overlay (§14.4)
+│   └── README.md                    ← provisioning runbook
 ├── docker-compose.yml
 ├── requirements.txt
 ├── pyproject.toml
@@ -1663,27 +1708,97 @@ Weights are configuration. **Changing a weight is not a code change and must not
 
 ## 31. Build order with acceptance gates
 
-Each phase is complete only when its gate passes. Gates are executable tests, not opinions.
+§20 is the **capability roadmap** -- what the system must eventually do. This section is the
+**execution order**, and it is deliberately not the same shape.
 
-| Phase | Build | Gate (must pass to proceed) |
+A strict P0→P7 march builds every layer to full depth before the next begins, which means
+nothing is visible or deployable until most of the work is done. Instead the build proceeds in
+**vertical slices**: each slice runs end to end from feed to screen, is deployed, and is
+demonstrable on its own. Later slices deepen the layers an earlier slice stubbed. The simplest
+component that closes the loop ships first; the sophisticated one replaces it once measured
+(ADR-05).
+
+Every gate is an executable test, not an opinion.
+
+### Slice 0 — Data foundation ✅ COMPLETE
+
+| Step | Build | Gate | State |
+|---|---|---|---|
+| 0.1 | `contracts/`, `config.py`, city profiles | A model missing `provenance` raises `ValidationError`. | ✅ |
+| 0.2 | `migrations/001–004`, Compose stack | Migrations apply cleanly from empty: 2 extensions, 12 tables, 4 hypertables. | ✅ |
+| 0.3 | `ingest/gtfs_import.py` | 399 routes, **9,630 stops with geometry**, 89,080 trips, 2,221,062 stop-times; re-import returns the same `feed_version_id`. | ✅ |
+| 0.4 | `ingest/convert.py` | Corpus converts; TripUpdates drop materially after dedup; malformed rows under 0.1%; peak RSS under 1 GB. | ✅ |
+
+### Slice A — It is alive (first deployable slice)
+
+Live vehicles from the real feed, on the real network, on a public URL. No prediction yet.
+
+| Step | Build | Gate |
 |---|---|---|
-| **P0.1** | `contracts/`, `config.py`, city profiles | `pytest tests/unit/test_contracts.py` — a model missing `provenance` raises `ValidationError`. |
-| **P0.2** | `migrations/001–004`, docker-compose (Postgres+PostGIS+Timescale+Redis) | `docker compose up -d && psql -f migrations/*.sql` applies cleanly from empty. |
-| **P0.3** | `ingest/gtfs_import.py` | Importing `data/mbta_gtfs.zip` yields exactly 399 routes, **9,630 stops with geometry**, 89,080 trips, 2,221,062 stop-times. (667 coordinate-less `location_type=3` pathway nodes are excluded by design — §6.2.1.) Re-import returns the **same** `feed_version_id`. |
-| **P0.4** | `ingest/convert.py` | Full CSV corpus converts to Parquet; TripUpdates row count drops materially after dedup; malformed rows are counted and stay under 0.1%; peak RSS stays under 1 GB. |
-| **P1.1** | `adapters/base.py`, `gtfs_rt.py`, `mbta.py` | Live poll produces valid `VehiclePositionEvent`s; zero records lack provenance. |
-| **P1.2** | `ingest/validate.py`, `mapmatch.py`, `stop_passage.py` | Map-match success >95% on a clean replay sample (§21); impossible-speed positions rejected. |
-| **P1.3** | `state/redis_state.py`, `headway.py` | Latest-state reads < 5 ms; headway computed for a known bunching case. |
-| **P2** | Occupancy plane + simulator | `UNKNOWN` never coerces to `EMPTY` (explicit test); simulator conserves board/alight. |
-| **P3.1** | `features/definitions.py`, `offline.py`, `online.py` | `tests/parity/` — online and offline vectors identical for a fixed historical timestamp. |
-| **P3.2** | `models/baseline.py` | Seasonal median trained and scored on a **chronological** split. Random splits rejected in review. |
-| **P3.3** | `models/crowd.py`, `delay.py` | GBDT beats Baseline 0 on threshold-region weighted MAE **and** pinball loss. If it does not, it does not ship. |
-| **P4.1** | `routing/planner.py` | Handles transfers, overnight times >24:00, no-route case. |
-| **P4.2** | `routing/ranker.py`, `departure.py` | Same OD returns visibly different orderings across the four profiles; every option has reasons. |
-| **P4.3** | `api/passenger.py` | `/v1/plan` contract test passes; p95 < 2.5 s on the demo dataset. |
-| **P5** | `api/stream.py`, re-score loop | Injected event changes the active recommendation within seconds; hysteresis prevents flapping. |
-| **P6** | `ops/hotspots.py`, `api/admin.py`, operator UI | Hotspot displayed with lead time before threshold breach. |
-| **P7** | Replay demo, monitoring, docs | Full 5-minute script runs **with networking disabled**. |
+| A.1 | `adapters/base.py`, `adapters/gtfs_rt.py`, `adapters/mbta.py` | A live poll produces valid `VehiclePositionEvent`s; **zero records lack provenance**; `speed_mps` is left None (§28.4). |
+| A.2 | `ingest/validate.py`, `state/redis_state.py` | Out-of-bounds and impossible-speed positions are rejected with a reason; latest-state read < 5 ms; state rebuilds from the database after a Redis restart. |
+| A.3 | `api/main.py`, `api/passenger.py` (read-only: `/v1/vehicles/{id}`, `/v1/stops/{id}/departures`), `/v1/health` | Contract tests against §29 shapes; every response carries `generated_at` and freshness. |
+| A.4 | `frontend/` live map (§33) | Vehicles move on the correct routes; a stale feed shows the freshness badge; **an unknown occupancy never renders as empty** (§33.3). |
+| A.5 | `deploy/` per §14.4 | A clean clone reaches a working public URL by documented runbook; only 80/443 exposed; Postgres and Redis unreachable from outside. |
+
+### Slice B — It predicts
+
+The cheapest honest forecast, end to end, with its uncertainty visible.
+
+| Step | Build | Gate |
+|---|---|---|
+| B.1 | `ingest/stop_passage.py`, `features/definitions.py`, `features/offline.py`, `features/online.py` | `tests/parity/` -- online and offline vectors identical for a fixed historical timestamp. |
+| B.2 | `models/baseline.py` (seasonal median), `models/registry.py` | Trained and scored on a **chronological** split; random splits rejected in review; every prediction records `model_version`. |
+| B.3 | `GET /v1/trips/{id}/forecast` + frontend forecast display | Returns p10/p50/p90; a missing forecast serializes as `UNKNOWN` with a null quantile block, and the UI shows "unknown", never a number. |
+
+### Slice C — It decides
+
+| Step | Build | Gate |
+|---|---|---|
+| C.1 | `routing/planner.py` | Handles transfers, overnight times >24:00, and the no-route case. |
+| C.2 | `routing/ranker.py`, `routing/departure.py` | The same origin/destination returns **visibly different orderings** across the four profiles; every option carries reason codes; weights change behaviour without a code change (§30.2). |
+| C.3 | `GET /v1/plan` | §29.1 contract test passes; p95 < 2.5 s on the demo dataset. |
+| C.4 | Frontend journey planner (§33.2) | Four profiles switchable; each option shows predicted crowd at the boarding stop, delay risk and a plain-language reason. |
+
+### Slice D — It adapts
+
+| Step | Build | Gate |
+|---|---|---|
+| D.1 | `api/stream.py`, event-triggered re-score | An injected crowd/delay event changes the active recommendation within seconds; hysteresis and cooldown prevent flapping (§10.5). |
+| D.2 | Frontend live journey view | The socket reconnects with backoff after a drop; the user is notified only when the preferred route changes. |
+
+### Slice E — Operators
+
+| Step | Build | Gate |
+|---|---|---|
+| E.1 | `ops/hotspots.py`, `api/admin.py` | A predicted hotspot is reported **before** the capacity threshold is breached, with lead time and supporting evidence. |
+| E.2 | Operator dashboard (§33.2) | Hotspot map, route forecast and fleet health with data-freshness flags; RBAC enforced server-side. |
+
+### Slice F — Deepen and harden
+
+Each step replaces something an earlier slice stubbed. **Nothing here ships without beating what
+it replaces.**
+
+| Step | Build | Gate |
+|---|---|---|
+| F.1 | `ingest/mapmatch.py` | Map-match success >95% on a clean replay sample (§21). |
+| F.2 | Occupancy pipeline + simulator | `UNKNOWN` never coerces to `EMPTY`; the simulator conserves board/alight and is repeatable by seed. |
+| F.3 | `models/crowd.py`, `models/delay.py` (GBDT) | **Beats Slice B's baseline** on threshold-region weighted MAE *and* pinball loss. If it does not, it does not ship. |
+| F.4 | `adapters/replay.py`, offline demo | The full five-minute script runs **with networking disabled**. |
+| F.5 | Monitoring, `ops/health.py`, docs | §16.2 metrics exposed; `/v1/admin/data-health` reports feed freshness and validation failures. |
+
+### 31.1 Traceability to §20
+
+| §20 phase | Where it is executed |
+|---|---|
+| P0 Data foundation | Slice 0 |
+| P1 Live fleet | A.1–A.2, deepened by F.1 |
+| P2 Occupancy pipeline | F.2 |
+| P3 Forecasting baseline | B.1–B.2, deepened by F.3 |
+| P4 Trip planning/ranking | C.1–C.4 |
+| P5 Live adaptation | D.1–D.2 |
+| P6 Operator dashboard | E.1–E.2 |
+| P7 Hardening | F.4–F.5, plus A.5 for the hosted path |
 
 ## 32. Conventions
 
@@ -1697,6 +1812,68 @@ Each phase is complete only when its gate passes. Gates are executable tests, no
 - **Data:** nothing in `data/` is ever hand-edited or committed (§CLAUDE.md).
 
 ---
+
+## 33. Frontend specification
+
+The frontend is a **working application against the live API**, not a mockup. It holds no
+business logic: it renders what §29 returns and never computes a forecast, a ranking or a crowd
+class locally.
+
+### 33.1 Stack
+
+| Concern | Choice |
+|---|---|
+| Framework | React 18 + TypeScript, built with Vite |
+| Map | MapLibre GL JS (no proprietary tile key required) |
+| Data fetching | TanStack Query for reads; one WebSocket for live updates (§12.1) |
+| Styling | CSS modules or Tailwind -- one, not both |
+| Build output | Static assets served by Caddy (§14.4); the frontend is never a Node server in production |
+
+Types are generated from the FastAPI OpenAPI schema, so the client cannot drift from §29.
+
+### 33.2 Screens
+
+| Route | Purpose | Slice |
+|---|---|---|
+| `/` live map | Vehicles on the real network, with freshness and occupancy state | A.4 |
+| `/plan` journey planner | Origin/destination, four preference profiles, ranked options with reasons | C.4 |
+| `/journey/:id` live journey | The active trip, re-scored as conditions change | D.2 |
+| `/operator` dashboard | Predicted hotspots with lead time, route forecast, fleet health | E.2 |
+
+### 33.3 Data-state rules (binding)
+
+These are the passenger-visible half of §12.4. They are **not** styling preferences, and each has
+a gate in §31.
+
+1. **Unknown is never empty.** A missing occupancy renders as "Unknown" in a neutral style. It
+   must never appear as 0%, as an empty vehicle, or in the same colour as a genuinely empty one.
+2. **Uncertainty is always visible.** Any forecast shown as a number is accompanied by its
+   p10–p90 band. A bare point estimate is a defect.
+3. **Every ranked option shows its reason.** Reason codes come from the API; the frontend does
+   not invent explanations.
+4. **Stale data is labelled.** When vehicle state exceeds the city profile's `stale_after_s`, the
+   UI shows a "live tracking delayed" badge (§16.1) rather than silently drawing an old position.
+5. **Fallbacks are disclosed.** `is_fallback: true` renders as "estimated from history".
+6. **Simulated data is marked.** Anything with `source_type=SIMULATED` is visibly tagged and is
+   never presented as operator data (§6.5).
+
+### 33.4 Live update behaviour
+
+- One WebSocket per active journey, with exponential backoff and jitter on reconnect.
+- On reconnect, refetch state rather than assuming the stream continued.
+- Respect the server's hysteresis: the UI does not re-sort on every message, only when the server
+  reports that the preferred route changed (§10.5).
+- A dropped socket degrades to polling and says so; it never silently freezes.
+
+### 33.5 Non-negotiables
+
+- **No secrets in the bundle.** No feed keys, no database credentials (§15).
+- **Keyboard reachable and screen-reader labelled** for the passenger flow. Crowding is never
+  conveyed by colour alone -- it always carries a text label, because red/green is the exact
+  pairing most affected by colour blindness.
+- **Responsive to a phone viewport.** The passenger flow is the mobile case by default.
+- The map stays usable at city scale: viewport bounding boxes are requested from the API rather
+  than fetching the whole fleet (§12.4 rule 5).
 
 # Appendix A — Example payloads
 
@@ -1786,6 +1963,9 @@ navigation apps have no incentive to build.
 | 2026-08-30 | **Part II added** (§25–§32): repo layout, contracts, DDL, module specs, API schemas, config, build gates | Makes "built exactly to the document" a checkable claim | Owner |
 | 2026-08-30 | §6.2.1, §28.1, §31: stop gate corrected from 10,297 to **9,630 stops with geometry**; 667 coordinate-less `location_type=3` pathway nodes excluded by design | The §31 gate figure (raw row count) contradicted the §27 `geom NOT NULL` schema. Surfaced by the P0.3 integration gate failing. Schema unchanged; the importer refuses to invent coordinates | Owner |
 | 2026-08-30 | §28.2, §31: malformed rows skipped and counted, conversion fails above 0.1%; single-writer requirement stated | A live append-only CSV always ends mid-write, so strict failure is unusable; silent skipping would let a broken capture report success. Surfaced when three concurrent recorders produced torn rows | Owner |
+| 2026-08-30 | **§31 restructured into vertical slices** (Slice 0/A/B/C/D/E/F) with a §31.1 traceability table back to §20 | A strict P0-P7 march leaves nothing visible or deployable until most of the work is done. Slices ship end to end and deploy early; later slices deepen what earlier ones stubbed | Owner |
+| 2026-08-30 | **§33 added: frontend specification** | The frontend was named in §25 and §23 but had no specification and only one incidental gate across 17 phase rows. It is a working application, so its data-state rules (unknown is never empty, uncertainty always visible, reasons always shown) are binding | Owner |
+| 2026-08-30 | **§14.4 added: public demo deployment on a single VM** | Deployment was absent from the build order entirely. One VM running the existing Compose stack keeps §27 unchanged, since TimescaleDB is unavailable on most managed free tiers. The offline replay requirement is retained, not replaced | Owner |
 
 > **To propose a change:** add a row here with the date, the change, the rationale and a blank
 > Approved column; edit the relevant section; and raise it with the project owner. Do not write
