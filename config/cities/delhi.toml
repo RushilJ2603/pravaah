@@ -1,0 +1,43 @@
+# Delhi OTD -- deployment target. Not yet integrated.
+#
+# SOLUTION.md section 6.2.2: the portal publishes no occupancy at all, and warns
+# that stop_times.txt arrival/departure times are rough estimates generated with
+# an assumed constant speed. Static times are therefore used for topology and
+# service definition only; operational travel times are learned from live
+# observations.
+#
+# Because occupancy.available = false, the occupancy plane falls back to the
+# simulator or crowdsourcing, and every resulting metric must be labelled
+# non-operator (SOLUTION.md section 2.4).
+
+city_id = "delhi"
+agency_id = "DTC"
+timezone = "Asia/Kolkata"
+display_name = "Delhi (OTD)"
+
+[bounds]
+min_lat = 28.35
+max_lat = 28.90
+min_lon = 76.80
+max_lon = 77.45
+
+[feeds]
+gtfs_static = "https://otd.delhi.gov.in/data/static/"
+vehicle_positions = "https://otd.delhi.gov.in/api/realtime/VehiclePositions.pb"
+trip_updates = ""
+requires_api_key = true
+poll_interval_s = 30
+trip_update_every = 0
+
+[occupancy]
+source_type = "SIMULATED"
+available = false
+coverage_estimate = 0.0
+
+[capacity]
+default_bus_capacity = 50
+default_rail_capacity = 300
+
+[validation]
+max_plausible_speed_mps = 30.0
+stale_after_s = 120

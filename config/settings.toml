@@ -1,0 +1,63 @@
+# Non-secret defaults. Secrets live in .env (git-ignored).
+# SOLUTION.md section 30.2 -- preference weights are CONFIGURATION.
+# Changing a weight must never require a code change.
+
+active_city = "mbta"
+
+# Generalized cost weights (SOLUTION.md section 10.2):
+#   wT travel, wW wait, wX transfer, wC crowd, wD delay risk,
+#   wU uncertainty, wP walking
+[preferences.fastest]
+wT = 1.00
+wW = 0.40
+wX = 0.30
+wC = 0.15
+wD = 0.35
+wU = 0.10
+wP = 0.20
+
+[preferences.least_crowded]
+wT = 0.40
+wW = 0.30
+wX = 0.30
+wC = 1.00
+wD = 0.35
+wU = 0.20
+wP = 0.20
+
+[preferences.most_reliable]
+wT = 0.45
+wW = 0.35
+wX = 0.35
+wC = 0.35
+wD = 0.90
+wU = 0.70
+wP = 0.20
+
+[preferences.balanced]
+wT = 0.70
+wW = 0.35
+wX = 0.35
+wC = 0.70
+wD = 0.60
+wU = 0.30
+wP = 0.20
+
+[departure]
+horizons_min = [0, 5, 10, 15, 20]
+improvement_threshold = 0.10
+waiting_disutility_per_min = 0.012
+
+[reroute]
+material_threshold = 0.15
+cooldown_s = 180
+
+[database]
+dsn = "postgresql://pravaah:pravaah@localhost:5432/pravaah"
+
+[redis]
+url = "redis://localhost:6379/0"
+
+[paths]
+data_dir = "data"
+parquet_dir = "data/parquet"

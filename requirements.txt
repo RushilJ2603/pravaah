@@ -1,0 +1,24 @@
+# Pinned per SOLUTION.md section 32. Adding a dependency that alters section 23
+# is a document change first.
+
+# --- data capture (already in use by data/record_feed.py) ---
+gtfs-realtime-bindings==2.2.0
+protobuf==7.36.0
+
+# --- contracts and configuration ---
+pydantic==2.9.2
+
+# --- data platform ---
+pandas==2.2.3
+pyarrow==17.0.0
+psycopg[binary]==3.2.3
+redis==5.1.1
+
+# --- API ---
+fastapi==0.115.0
+uvicorn[standard]==0.31.0
+
+# --- ML baseline (SOLUTION.md section 9.4) ---
+lightgbm==4.5.0
+scikit-learn==1.5.2
+numpy==2.1.1

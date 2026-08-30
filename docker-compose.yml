@@ -1,0 +1,36 @@
+# Demo profile (SOLUTION.md section 14.1). Docker Compose only -- no Kubernetes.
+#
+#   docker compose up -d
+#
+# Migrations in ./migrations are applied in filename order on first boot of an
+# empty volume. To re-apply from scratch: docker compose down -v && up -d.
+services:
+  db:
+    image: timescale/timescaledb-ha:pg16
+    environment:
+      POSTGRES_USER: pravaah
+      POSTGRES_PASSWORD: pravaah
+      POSTGRES_DB: pravaah
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/home/postgres/pgdata/data
+      - ./migrations:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U pravaah -d pravaah"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:

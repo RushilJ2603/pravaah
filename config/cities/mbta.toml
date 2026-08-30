@@ -1,0 +1,41 @@
+# MBTA (Boston) -- development substrate.
+#
+# SOLUTION.md section 2.4 / ADR-08: Delhi is the deployment target, MBTA is the
+# development substrate, because Delhi publishes no occupancy data and crowd
+# labels are the product. All city knowledge is confined to this file and to
+# src/pravaah/adapters/.
+
+city_id = "mbta"
+agency_id = "MBTA"
+timezone = "America/New_York"
+display_name = "MBTA (Boston)"
+
+[bounds]
+# Positions outside this box are rejected by ingest/validate.py.
+min_lat = 41.2
+max_lat = 43.0
+min_lon = -71.9
+max_lon = -69.9
+
+[feeds]
+gtfs_static = "https://cdn.mbta.com/MBTA_GTFS.zip"
+vehicle_positions = "https://cdn.mbta.com/realtime/VehiclePositions.pb"
+trip_updates = "https://cdn.mbta.com/realtime/TripUpdates.pb"
+requires_api_key = false
+poll_interval_s = 20
+trip_update_every = 15
+
+[occupancy]
+# occupancy_status is carried inline on VehiclePositions.
+source_type = "REAL_OPERATOR"
+available = true
+coverage_estimate = 0.688
+
+[capacity]
+# Fallback when fleet master data is absent.
+default_bus_capacity = 60
+default_rail_capacity = 200
+
+[validation]
+max_plausible_speed_mps = 35.0
+stale_after_s = 90
