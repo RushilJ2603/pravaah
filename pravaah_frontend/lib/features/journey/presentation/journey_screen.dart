@@ -1,19 +1,29 @@
 import 'package:flutter/material.dart';
-import '../../../../theme/app_theme.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+import '../../../core/api/api_client.dart';
+import '../../../core/api/models.dart';
+import '../../../core/api/places.dart';
+import '../../../theme/app_theme.dart';
+import '../providers/plan_provider.dart';
 import 'widgets/journey_live_map.dart';
 
 enum JourneyState { initial, searching, results, active }
 
-class JourneyScreen extends StatefulWidget {
+class JourneyScreen extends ConsumerStatefulWidget {
   const JourneyScreen({super.key});
 
   @override
-  State<JourneyScreen> createState() => _JourneyScreenState();
+  ConsumerState<JourneyScreen> createState() => _JourneyScreenState();
 }
 
-class _JourneyScreenState extends State<JourneyScreen> {
+class _JourneyScreenState extends ConsumerState<JourneyScreen> {
   JourneyState _currentState = JourneyState.initial;
-  String _selectedPreference = 'Fastest';
+  PlanProfile _selectedProfile = PlanProfile.balanced;
+
+  /// Set once the user searches; the provider owns loading and error state
+  /// from there, so this screen never hand-rolls a spinner again.
+  PlanQuery? _query;
 
   final TextEditingController _originController = TextEditingController();
   final TextEditingController _destController = TextEditingController();
@@ -26,14 +36,30 @@ class _JourneyScreenState extends State<JourneyScreen> {
       return;
     }
 
-    setState(() => _currentState = JourneyState.searching);
-    
-    // Simulate network delay for /v1/plan
-    await Future.delayed(const Duration(seconds: 2));
-    
-    if (mounted) {
-      setState(() => _currentState = JourneyState.results);
+    final origin = findPlace(_originController.text);
+    final destination = findPlace(_destController.text);
+    if (origin == null || destination == null) {
+      final unknown = origin == null ? _originController.text : _destController.text;
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(content: Text('Could not find "$unknown". Pick a suggestion.')),
+      );
+      return;
     }
+    if (origin.name == destination.name) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('Origin and destination are the same.')),
+      );
+      return;
+    }
+
+    setState(() {
+      _query = PlanQuery(
+        origin: origin,
+        destination: destination,
+        profile: _selectedProfile,
+      );
+      _currentState = JourneyState.results;
+    });
   }
 
   void _startJourney() {
@@ -125,9 +151,10 @@ class _JourneyScreenState extends State<JourneyScreen> {
         Wrap(
           spacing: 8,
           children: [
-            _buildPreferenceChip('Fastest'),
-            _buildPreferenceChip('Least Crowded'),
-            _buildPreferenceChip('Direct'),
+            _buildPreferenceChip(PlanProfile.fastest),
+            _buildPreferenceChip(PlanProfile.leastCrowded),
+            _buildPreferenceChip(PlanProfile.mostReliable),
+            _buildPreferenceChip(PlanProfile.balanced),
           ],
         ),
         const SizedBox(height: 32),
@@ -149,29 +176,16 @@ class _JourneyScreenState extends State<JourneyScreen> {
             ),
           )
         else if (_currentState == JourneyState.results) ...[
-          Text('Suggested Routes', style: Theme.of(context).textTheme.titleLarge),
-          const SizedBox(height: 16),
-          // Rule 3: Ranked Options explicitly show their reason code.
-          _buildRankedOption(
-            'Route 543',
-            '42 mins',
-            'Recommended: Fastest Route', // Rule 3 explicitly shown
-            Icons.directions_bus,
-            true,
-          ),
-          _buildRankedOption(
-            'Route 311',
-            '50 mins',
-            'Alternative: Least Crowded', // Rule 3 explicitly shown
-            Icons.directions_bus,
-            false,
-          ),
+          _buildResults(),
           const SizedBox(height: 16),
           SizedBox(
             width: double.infinity,
             child: OutlinedButton(
               onPressed: () {
-                setState(() => _currentState = JourneyState.initial);
+                setState(() {
+                  _currentState = JourneyState.initial;
+                  _query = null;
+                });
               },
               child: const Text('Clear Search'),
             ),
@@ -179,6 +193,246 @@ class _JourneyScreenState extends State<JourneyScreen> {
         ]
       ],
     );
+  }
+
+  /// Ranked options straight from `/v1/plan`.
+  ///
+  /// Loading, empty and error are all rendered explicitly. A transport app that
+  /// shows a blank list when the network fails is worse than one that says so.
+  Widget _buildResults() {
+    final query = _query;
+    if (query == null) return const SizedBox.shrink();
+
+    return ref.watch(planProvider(query)).when(
+          loading: () => const Center(
+            child: Padding(
+              padding: EdgeInsets.all(32.0),
+              child: CircularProgressIndicator(color: AppTheme.primaryBlue),
+            ),
+          ),
+          error: (error, _) => _buildError(error),
+          data: (plan) {
+            if (plan.options.isEmpty) {
+              return _buildNotice(
+                Icons.search_off,
+                'No direct service found between these stops in the next hour.',
+              );
+            }
+            return Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Text('Suggested Routes',
+                        style: Theme.of(context).textTheme.titleLarge),
+                    const Spacer(),
+                    Text('${plan.options.length} options',
+                        style: const TextStyle(
+                            color: AppTheme.textSecondary, fontSize: 12)),
+                  ],
+                ),
+                const SizedBox(height: 16),
+                for (final option in plan.options) _buildOptionCard(option),
+              ],
+            );
+          },
+        );
+  }
+
+  Widget _buildError(Object error) {
+    final message = error is ApiException
+        ? error.friendlyMessage
+        : 'Could not plan this journey.';
+    return _buildNotice(Icons.cloud_off, message, retry: true);
+  }
+
+  Widget _buildNotice(IconData icon, String message, {bool retry = false}) {
+    return Container(
+      width: double.infinity,
+      padding: const EdgeInsets.all(24),
+      decoration: BoxDecoration(
+        color: Colors.white,
+        borderRadius: BorderRadius.circular(16),
+        border: Border.all(color: AppTheme.textSecondary.withAlpha(40)),
+      ),
+      child: Column(
+        children: [
+          Icon(icon, color: AppTheme.textSecondary, size: 32),
+          const SizedBox(height: 12),
+          Text(message,
+              textAlign: TextAlign.center,
+              style: const TextStyle(color: AppTheme.textSecondary)),
+          if (retry) ...[
+            const SizedBox(height: 12),
+            TextButton(
+              onPressed: () {
+                final q = _query;
+                if (q != null) ref.invalidate(planProvider(q));
+              },
+              child: const Text('Try again'),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  /// One ranked option. Every reason string comes from the API verbatim.
+  Widget _buildOptionCard(JourneyOption option) {
+    final crowd = option.boardingCrowd;
+    return GestureDetector(
+      onTap: _startJourney,
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 16),
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(16),
+          border: option.isRecommended
+              ? Border.all(color: AppTheme.primaryBlue, width: 2)
+              : null,
+          boxShadow: const [
+            BoxShadow(
+                color: AppTheme.cardShadow, blurRadius: 4, offset: Offset(0, 2)),
+          ],
+        ),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                CircleAvatar(
+                  backgroundColor: AppTheme.primaryBlue.withAlpha(20),
+                  child: const Icon(Icons.directions_bus,
+                      color: AppTheme.primaryBlue),
+                ),
+                const SizedBox(width: 16),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Text(option.routeLabel,
+                          style: const TextStyle(
+                              fontWeight: FontWeight.bold, fontSize: 16)),
+                      if (option.legs.isNotEmpty)
+                        Text(
+                          '${option.legs.first.boardStopName} to '
+                          '${option.legs.first.alightStopName}',
+                          style: const TextStyle(
+                              color: AppTheme.textSecondary, fontSize: 12),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                    ],
+                  ),
+                ),
+                Column(
+                  crossAxisAlignment: CrossAxisAlignment.end,
+                  children: [
+                    Text('${option.totalMinutes} min',
+                        style: const TextStyle(
+                            fontWeight: FontWeight.bold, fontSize: 16)),
+                    if (option.isRecommended)
+                      const Text('Recommended',
+                          style: TextStyle(
+                              color: AppTheme.primaryBlue,
+                              fontSize: 11,
+                              fontWeight: FontWeight.bold)),
+                  ],
+                ),
+              ],
+            ),
+            if (crowd != null) ...[
+              const SizedBox(height: 12),
+              _buildCrowdBand(crowd),
+            ],
+            const SizedBox(height: 12),
+            // Rule 3: every ranked option shows its reason, and the text is the
+            // server's -- the client never invents an explanation.
+            for (final reason in option.reasons)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 4),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const Padding(
+                      padding: EdgeInsets.only(top: 2),
+                      child: Icon(Icons.check_circle_outline,
+                          size: 14, color: AppTheme.textSecondary),
+                    ),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(reason,
+                          style: const TextStyle(
+                              fontSize: 12, color: AppTheme.textSecondary)),
+                    ),
+                  ],
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// A forecast is a band, never a point (section 33.3 rule 2), and crowding is
+  /// never conveyed by colour alone (section 33.5) -- so the label is text.
+  Widget _buildCrowdBand(CrowdBand crowd) {
+    final colour = _crowdColour(crowd.p50);
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: colour.withAlpha(18),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: colour.withAlpha(70)),
+      ),
+      child: Row(
+        children: [
+          Icon(crowd.isKnown ? Icons.people_outline : Icons.help_outline,
+              size: 16, color: colour),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(crowd.summary,
+                    style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        color: colour)),
+                if (crowd.isKnown && crowd.p50Onboard != null)
+                  Text(
+                    'when you board · ${crowd.p10Onboard}-${crowd.p90Onboard} '
+                    'of ${crowd.capacity} onboard'
+                    '${crowd.isFallback ? ' · estimated from history' : ''}',
+                    style: const TextStyle(
+                        fontSize: 10, color: AppTheme.textSecondary),
+                  ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Color _crowdColour(CrowdLevel level) {
+    switch (level) {
+      case CrowdLevel.empty:
+      case CrowdLevel.manySeats:
+        return const Color(0xFF2E7D32);
+      case CrowdLevel.fewSeats:
+        return const Color(0xFF9E7B00);
+      case CrowdLevel.standing:
+        return const Color(0xFFD84315);
+      case CrowdLevel.crushed:
+      case CrowdLevel.full:
+      case CrowdLevel.notAccepting:
+        return const Color(0xFFB71C1C);
+      case CrowdLevel.unknown:
+        // Unknown is neutral grey. It must never look like "empty".
+        return const Color(0xFF6B7280);
+    }
   }
 
   Widget _buildLocationInput(IconData icon, String hint, Color iconColor, TextEditingController controller) {
@@ -199,71 +453,31 @@ class _JourneyScreenState extends State<JourneyScreen> {
     );
   }
 
-  Widget _buildPreferenceChip(String label) {
-    final isSelected = _selectedPreference == label;
+  Widget _buildPreferenceChip(PlanProfile profile) {
+    final isSelected = _selectedProfile == profile;
     return ChoiceChip(
-      label: Text(label),
+      label: Text(profile.label),
       selected: isSelected,
       onSelected: (bool selected) {
-        if (selected) {
-          setState(() => _selectedPreference = label);
-        }
+        if (!selected) return;
+        setState(() {
+          _selectedProfile = profile;
+          // Re-rank immediately if results are already on screen: the whole
+          // point is that the same candidates reorder for a different priority.
+          final q = _query;
+          if (q != null) {
+            _query = PlanQuery(
+              origin: q.origin,
+              destination: q.destination,
+              profile: profile,
+            );
+          }
+        });
       },
       selectedColor: AppTheme.primaryBlue.withAlpha(30),
       labelStyle: TextStyle(
         color: isSelected ? AppTheme.primaryBlue : AppTheme.textPrimary,
         fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
-      ),
-    );
-  }
-
-  Widget _buildRankedOption(String title, String eta, String reason, IconData icon, bool isPrimary) {
-    return GestureDetector(
-      onTap: _startJourney,
-      child: Container(
-        margin: const EdgeInsets.only(bottom: 16),
-        padding: const EdgeInsets.all(16),
-        decoration: BoxDecoration(
-          color: Colors.white,
-          borderRadius: BorderRadius.circular(16),
-          border: isPrimary ? Border.all(color: AppTheme.primaryBlue, width: 2) : null,
-          boxShadow: const [
-            BoxShadow(color: AppTheme.cardShadow, blurRadius: 4, offset: Offset(0, 2)),
-          ],
-        ),
-        child: Row(
-          children: [
-            CircleAvatar(
-              backgroundColor: AppTheme.primaryBlue.withAlpha(20),
-              child: Icon(icon, color: AppTheme.primaryBlue),
-            ),
-            const SizedBox(width: 16),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text(title, style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
-                      Text(eta, style: const TextStyle(fontWeight: FontWeight.bold, color: AppTheme.primaryBlue)),
-                    ],
-                  ),
-                  const SizedBox(height: 4),
-                  // Rule 3: Reason codes
-                  Text(
-                    reason,
-                    style: TextStyle(
-                      color: isPrimary ? Colors.green : AppTheme.textSecondary,
-                      fontSize: 12,
-                      fontWeight: FontWeight.w600,
-                    ),
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
       ),
     );
   }

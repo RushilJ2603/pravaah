@@ -372,6 +372,18 @@ PROFILES: dict[str, dict[str, float]] = {
 #: How far a passenger will walk to a stop, metres.
 WALK_RADIUS_M = 700
 
+#: Minimum time to change vehicles at an interchange, seconds. A connection
+#: tighter than this is not a journey a passenger can actually make.
+MIN_TRANSFER_S = 180
+
+#: An interchange is only worth considering if the wait there is reasonable.
+MAX_TRANSFER_WAIT_S = 1800
+
+#: Bounds on the transfer search. Without these the four-way join over the
+#: timetable degrades badly; with them the search stays interactive.
+MAX_BOARDINGS = 250
+MAX_ARRIVALS = 500
+
 
 @router.get("/plan", response_model=PlanResponse)
 def plan(
@@ -449,11 +461,6 @@ def plan(
             ),
         )
         rows = cur.fetchall()
-
-    if not rows:
-        raise _fail(
-            ErrorCode.NO_ROUTE_FOUND, "no direct service found in the requested window", status=404
-        )
 
     weights = PROFILES[profile]
     options: list[JourneyOption] = []
@@ -536,6 +543,35 @@ def plan(
             )
         )
 
+    # Most origin/destination pairs in a real network have no single route
+    # joining them, so a direct-only planner answers "no service" for journeys
+    # that are perfectly possible with one change. Search for those whenever
+    # direct results are thin.
+    if len(options) < 3:
+        with resources.db_pool.connection() as conn, conn.cursor() as cur:
+            options.extend(
+                _transfer_options(
+                    cur,
+                    feed_version_id=feed_version_id,
+                    origins=[s[0] for s in origins],
+                    destinations=[s[0] for s in destinations],
+                    from_seconds=from_seconds,
+                    to_seconds=to_seconds,
+                    midnight=midnight,
+                    tz=tz,
+                    weights=weights,
+                    forecaster=resources.forecaster,
+                    seen_routes=seen_routes,
+                )
+            )
+
+    if not options:
+        raise _fail(
+            ErrorCode.NO_ROUTE_FOUND,
+            "no service found between these stops in the requested window",
+            status=404,
+        )
+
     options.sort(key=lambda o: o.score)
     ranked = [
         o.model_copy(update={"is_recommended": index == 0})
@@ -597,3 +633,224 @@ def _latest_feed_version(cur, city_id: str) -> int:
     if row is None:
         raise _fail(ErrorCode.FEED_UNAVAILABLE, "no GTFS feed imported", status=503)
     return row[0]
+
+
+def _transfer_options(
+    cur,
+    *,
+    feed_version_id: int,
+    origins: list[str],
+    destinations: list[str],
+    from_seconds: int,
+    to_seconds: int,
+    midnight: datetime,
+    tz,
+    weights: dict[str, float],
+    forecaster,
+    seen_routes: set[str],
+) -> list[JourneyOption]:
+    """Journeys made with exactly one change.
+
+    A direct-only planner reports "no service" for the majority of origin and
+    destination pairs in any real network, because few single routes happen to
+    join two arbitrary points. That is a missing feature, not a missing stop.
+
+    The search is two bounded queries joined in Python rather than a four-way
+    self-join in SQL: the join predicate is a time comparison across two
+    independent trip sets, which the planner handles badly, and the same
+    shape already cost us a five-minute query on the hotspots endpoint.
+    """
+    # Leg 1: everywhere a bus leaving one of the origin stops can take you.
+    cur.execute(
+        """
+        WITH board AS (
+            SELECT trip_id, stop_id, stop_sequence, departure_seconds
+              FROM stop_time
+             WHERE feed_version_id = %s AND stop_id = ANY(%s)
+               AND departure_seconds BETWEEN %s AND %s
+             ORDER BY departure_seconds
+             LIMIT %s
+        )
+        SELECT b.trip_id, t.route_id, b.stop_id, b.stop_sequence, b.departure_seconds,
+               d.stop_id, d.stop_sequence, d.arrival_seconds
+          FROM board b
+          JOIN stop_time d
+            ON d.feed_version_id = %s AND d.trip_id = b.trip_id
+           AND d.stop_sequence > b.stop_sequence
+          JOIN trip t ON t.feed_version_id = %s AND t.trip_id = b.trip_id
+        """,
+        (feed_version_id, origins, from_seconds, to_seconds, MAX_BOARDINGS,
+         feed_version_id, feed_version_id),
+    )
+    leg1 = cur.fetchall()
+    if not leg1:
+        return []
+
+    # Leg 2: everywhere a bus that reaches a destination stop has come from.
+    cur.execute(
+        """
+        WITH arrive AS (
+            SELECT trip_id, stop_id, stop_sequence, arrival_seconds
+              FROM stop_time
+             WHERE feed_version_id = %s AND stop_id = ANY(%s)
+               AND arrival_seconds BETWEEN %s AND %s
+             ORDER BY arrival_seconds
+             LIMIT %s
+        )
+        SELECT a.trip_id, t.route_id, o.stop_id, o.stop_sequence, o.departure_seconds,
+               a.stop_id, a.stop_sequence, a.arrival_seconds
+          FROM arrive a
+          JOIN stop_time o
+            ON o.feed_version_id = %s AND o.trip_id = a.trip_id
+           AND o.stop_sequence < a.stop_sequence
+          JOIN trip t ON t.feed_version_id = %s AND t.trip_id = a.trip_id
+        """,
+        (feed_version_id, destinations, from_seconds, to_seconds + 3600, MAX_ARRIVALS,
+         feed_version_id, feed_version_id),
+    )
+    leg2 = cur.fetchall()
+    if not leg2:
+        return []
+
+    # Index leg 2 by the stop it can be boarded at, earliest departure first.
+    from collections import defaultdict
+
+    boardable: dict[str, list] = defaultdict(list)
+    for row in leg2:
+        boardable[row[2]].append(row)
+    for rows in boardable.values():
+        rows.sort(key=lambda r: r[4])
+
+    names = _stop_names(cur, feed_version_id)
+    route_names = _route_names(cur, feed_version_id)
+
+    best: dict[tuple[str, str], JourneyOption] = {}
+    for (t1, r1, board1, seq1, dep1, xfer, seq1b, arr1) in leg1:
+        candidates = boardable.get(xfer)
+        if not candidates:
+            continue
+        for (t2, r2, _b2, seq2, dep2, alight2, seq2b, arr2) in candidates:
+            if r2 == r1:
+                continue  # changing onto the same route is not a transfer
+            wait = dep2 - arr1
+            if wait < MIN_TRANSFER_S or wait > MAX_TRANSFER_WAIT_S:
+                continue
+
+            # One option per route pair: twenty departures of the same two
+            # buses is not twenty choices.
+            key = (r1, r2)
+            if key in best or r1 in seen_routes:
+                break
+
+            departure = midnight + timedelta(seconds=int(dep1))
+            arrival = midnight + timedelta(seconds=int(arr2))
+            total_min = max(1, int((arr2 - from_seconds) / 60))
+            ride_min = max(1, int(((arr1 - dep1) + (arr2 - dep2)) / 60))
+            wait_min = int(wait / 60)
+
+            crowd1 = _forecast_at(forecaster, departure, tz, seq1, cur, feed_version_id, t1)
+            crowd2 = _forecast_at(
+                forecaster, midnight + timedelta(seconds=int(dep2)), tz, seq2,
+                cur, feed_version_id, t2,
+            )
+            ordinal = max(
+                (c.p50_class.ordinal or 0) for c in (crowd1, crowd2) if c is not None
+            )
+
+            score = (
+                total_min
+                + ordinal * weights["crowd"]
+                + weights["transfer"]  # one change
+            )
+
+            reasons = [f"change at {names.get(xfer, xfer)}"]
+            if crowd1 is not None and crowd1.p50_class.is_known:
+                reasons.append(f"predicted {_readable(crowd1.p50_class)} when you board")
+            reasons.append(f"{ride_min} min riding, {wait_min} min to change")
+
+            best[key] = JourneyOption(
+                option_id=f"{t1}:{seq1}-{seq1b}|{t2}:{seq2}-{seq2b}",
+                total_minutes=total_min,
+                transfers=1,
+                departure=departure,
+                arrival=arrival,
+                legs=[
+                    JourneyLeg(
+                        route_id=r1,
+                        route_name=route_names.get(r1),
+                        board_stop_id=board1,
+                        board_stop_name=names.get(board1, board1),
+                        alight_stop_id=xfer,
+                        alight_stop_name=names.get(xfer, xfer),
+                        departure=departure,
+                        arrival=midnight + timedelta(seconds=int(arr1)),
+                        stops=int(seq1b - seq1),
+                        crowd=_band(crowd1) if crowd1 else _band(_unknown_band()),
+                    ),
+                    JourneyLeg(
+                        route_id=r2,
+                        route_name=route_names.get(r2),
+                        board_stop_id=xfer,
+                        board_stop_name=names.get(xfer, xfer),
+                        alight_stop_id=alight2,
+                        alight_stop_name=names.get(alight2, alight2),
+                        departure=midnight + timedelta(seconds=int(dep2)),
+                        arrival=arrival,
+                        stops=int(seq2b - seq2),
+                        crowd=_band(crowd2) if crowd2 else _band(_unknown_band()),
+                    ),
+                ],
+                score=round(score, 2),
+                reasons=reasons,
+            )
+            break  # earliest usable connection for this pair is enough
+
+    return sorted(best.values(), key=lambda o: o.score)[:4]
+
+
+def _forecast_at(forecaster, when, tz, sequence: int, cur, feed_version_id: int, trip_id: str):
+    """Crowd band for boarding `trip_id` at `sequence`."""
+    if forecaster is None:
+        return None
+    total = _trip_length(cur, feed_version_id, trip_id)
+    position = (sequence - 1) / max(total - 1, 1)
+    return forecaster.predict(when.astimezone(tz).hour, position)
+
+
+_TRIP_LENGTHS: dict[tuple[int, str], int] = {}
+
+
+def _trip_length(cur, feed_version_id: int, trip_id: str) -> int:
+    key = (feed_version_id, trip_id)
+    if key not in _TRIP_LENGTHS:
+        cur.execute(
+            "SELECT max(stop_sequence) FROM stop_time WHERE feed_version_id=%s AND trip_id=%s",
+            (feed_version_id, trip_id),
+        )
+        row = cur.fetchone()
+        _TRIP_LENGTHS[key] = int(row[0]) if row and row[0] else 1
+    return _TRIP_LENGTHS[key]
+
+
+_STOP_NAMES: dict[int, dict[str, str]] = {}
+
+
+def _stop_names(cur, feed_version_id: int) -> dict[str, str]:
+    if feed_version_id not in _STOP_NAMES:
+        cur.execute(
+            "SELECT stop_id, name FROM stop WHERE feed_version_id=%s", (feed_version_id,)
+        )
+        _STOP_NAMES[feed_version_id] = dict(cur.fetchall())
+    return _STOP_NAMES[feed_version_id]
+
+
+_ROUTE_NAMES: dict[int, dict[str, str]] = {}
+
+
+def _route_names(cur, feed_version_id: int) -> dict[str, str]:
+    if feed_version_id not in _ROUTE_NAMES:
+        cur.execute(
+            "SELECT route_id, long_name FROM route WHERE feed_version_id=%s", (feed_version_id,)
+        )
+        _ROUTE_NAMES[feed_version_id] = dict(cur.fetchall())
+    return _ROUTE_NAMES[feed_version_id]
