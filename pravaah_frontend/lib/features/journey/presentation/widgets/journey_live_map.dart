@@ -1,5 +1,8 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_map/flutter_map.dart';
+import 'package:http/http.dart' as http;
 import 'package:latlong2/latlong.dart';
 
 import '../../../../core/api/models.dart';
@@ -35,6 +38,56 @@ class _JourneyLiveMapState extends State<JourneyLiveMap> {
 
   /// Index into `option.legs` of the leg whose card is open, if any.
   int? _selectedLeg;
+
+  /// Road-following geometry once OSRM answers. Null until then, and null
+  /// forever if the call fails -- the straight-line points are the fallback.
+  List<LatLng>? _roadGeometry;
+
+  @override
+  void initState() {
+    super.initState();
+    _fetchRoadGeometry();
+  }
+
+  @override
+  void didUpdateWidget(covariant JourneyLiveMap old) {
+    super.didUpdateWidget(old);
+    if (old.option.optionId != widget.option.optionId) {
+      setState(() => _roadGeometry = null);
+      _fetchRoadGeometry();
+    }
+  }
+
+  /// Ask OSRM to route through the journey's stops in order.
+  ///
+  /// HTTPS deliberately: the app is served over HTTPS behind the demo tunnel,
+  /// and a browser blocks a plain-HTTP request from that page as mixed content.
+  Future<void> _fetchRoadGeometry() async {
+    final waypoints = _routePoints;
+    if (waypoints.length < 2) return;
+    // OSRM's demo server rejects very long waypoint lists; a journey never has
+    // many stops, but keep the request bounded regardless.
+    final trimmed = waypoints.length <= 25 ? waypoints : [waypoints.first, waypoints.last];
+    final coords =
+        trimmed.map((p) => '${p.longitude},${p.latitude}').join(';');
+    try {
+      final response = await http
+          .get(Uri.parse(
+              'https://router.project-osrm.org/route/v1/driving/$coords'
+              '?overview=full&geometries=geojson'))
+          .timeout(const Duration(seconds: 8));
+      if (response.statusCode != 200) return;
+      final routes = (json.decode(response.body) as Map)['routes'] as List?;
+      if (routes == null || routes.isEmpty) return;
+      final line = (routes.first['geometry']['coordinates'] as List)
+          .map((c) => LatLng((c[1] as num).toDouble(), (c[0] as num).toDouble()))
+          .toList();
+      if (line.isEmpty || !mounted) return;
+      setState(() => _roadGeometry = line);
+    } catch (_) {
+      // Offline, rate-limited or slow: keep the straight-line path.
+    }
+  }
 
   LatLng get _source => LatLng(widget.origin.lat, widget.origin.lon);
   LatLng get _dest => LatLng(widget.destination.lat, widget.destination.lon);
@@ -80,6 +133,10 @@ class _JourneyLiveMapState extends State<JourneyLiveMap> {
   @override
   Widget build(BuildContext context) {
     final points = _routePoints;
+    // The line that gets drawn: road geometry when we have it, the stop-to-stop
+    // path otherwise. Camera framing always uses the stops, so the view does
+    // not jump when the road geometry arrives.
+    final drawn = _roadGeometry ?? points;
     final boardings = _boardingPoints;
     final selected = _selectedLeg;
 
@@ -106,7 +163,7 @@ class _JourneyLiveMapState extends State<JourneyLiveMap> {
               PolylineLayer(
                 polylines: [
                   Polyline(
-                    points: points,
+                    points: drawn,
                     color: AppTheme.primaryBlue.withAlpha(200),
                     strokeWidth: 4.0,
                   ),

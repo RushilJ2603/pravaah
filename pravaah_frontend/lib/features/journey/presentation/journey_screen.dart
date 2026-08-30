@@ -788,11 +788,27 @@ class _JourneyScreenState extends ConsumerState<JourneyScreen> {
         children: [
           Icon(icon, size: 14, color: textColor),
           const SizedBox(width: 6),
+          // Two lines, not one: the band and its provenance ("30-100 of 100
+          // onboard - estimated from history") is the honest part of this chip
+          // and was being ellipsed away on a phone.
           Flexible(
-            child: Text(
-              '$friendlyName • $forecastData',
-              style: TextStyle(fontSize: 12, fontWeight: FontWeight.bold, color: textColor),
-              overflow: TextOverflow.ellipsis,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  friendlyName,
+                  style: TextStyle(
+                      fontSize: 12, fontWeight: FontWeight.bold, color: textColor),
+                ),
+                Text(
+                  forecastData,
+                  style: TextStyle(
+                      fontSize: 10.5, color: textColor.withAlpha(200)),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ],
             ),
           ),
         ],

@@ -1,12 +1,15 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:go_router/go_router.dart';
+import '../../../../core/api/session.dart';
 import '../../../../theme/app_theme.dart';
 
-class ProfileScreen extends StatelessWidget {
+class ProfileScreen extends ConsumerWidget {
   const ProfileScreen({super.key});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final session = ref.watch(sessionProvider);
     return Scaffold(
       body: SafeArea(
         bottom: false,
@@ -26,7 +29,7 @@ class ProfileScreen extends StatelessWidget {
                   const SizedBox(height: 24),
                   
                   // Premium Header Card
-                  _buildHeaderCard(context),
+                  _buildHeaderCard(context, session),
                   const SizedBox(height: 24),
                   
                   // Quick Stats Row
@@ -34,6 +37,24 @@ class ProfileScreen extends StatelessWidget {
                   const SizedBox(height: 32),
                   
                   // Settings Groups
+                  // Staff access sits directly under the header, not below
+                  // six rows of settings: it was previously off-screen on a
+                  // phone, so the only authenticated part of the product
+                  // looked like it did not exist.
+                  _buildSettingsGroup('Staff', [
+                    if (session == null)
+                      _buildSettingItem(
+                          Icons.badge_outlined, 'Operator / Conductor sign in',
+                          onTap: () => context.push('/staff'))
+                    else
+                      _buildSettingItem(
+                          Icons.dashboard_outlined,
+                          'Open ${session.roleLabel.toLowerCase()} console',
+                          trailingText: session.username,
+                          onTap: () => context.push('/staff')),
+                  ]),
+                  const SizedBox(height: 24),
+
                   _buildSettingsGroup('Account', [
                     _buildSettingItem(Icons.payment, 'Payment Methods'),
                     _buildSettingItem(Icons.location_on_outlined, 'Saved Addresses'),
@@ -48,15 +69,6 @@ class ProfileScreen extends StatelessWidget {
                   ]),
                   const SizedBox(height: 24),
                   
-                  // Staff access. Passengers never sign in; this is the way
-                  // in for operators and conductors, and the backend decides
-                  // which console the credential opens.
-                  _buildSettingsGroup('Staff', [
-                    _buildSettingItem(Icons.badge_outlined, 'Operator / Conductor sign in',
-                        onTap: () => context.push('/staff')),
-                  ]),
-                  const SizedBox(height: 24),
-
                   _buildSettingsGroup('Support', [
                     _buildSettingItem(Icons.help_outline, 'Help Center'),
                     _buildSettingItem(Icons.report_problem_outlined, 'Report an Issue'),
@@ -73,8 +85,14 @@ class ProfileScreen extends StatelessWidget {
                         padding: const EdgeInsets.symmetric(vertical: 16),
                         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
                       ),
-                      onPressed: () {},
-                      child: const Text('Log Out', style: TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
+                      // Only staff have a session to end. A passenger is
+                      // anonymous by design, so there is nothing to log out of.
+                      onPressed: session == null
+                          ? null
+                          : () => ref.read(sessionProvider.notifier).signOut(),
+                      child: Text(
+                          session == null ? 'Not signed in' : 'Log Out',
+                          style: const TextStyle(fontWeight: FontWeight.bold, fontSize: 16)),
                     ),
                   ),
                   const SizedBox(height: 120),
@@ -87,7 +105,7 @@ class ProfileScreen extends StatelessWidget {
     );
   }
 
-  Widget _buildHeaderCard(BuildContext context) {
+  Widget _buildHeaderCard(BuildContext context, StaffSession? session) {
     return Container(
       padding: const EdgeInsets.all(24),
       decoration: BoxDecoration(
@@ -110,9 +128,14 @@ class ProfileScreen extends StatelessWidget {
               color: Colors.white,
               shape: BoxShape.circle,
               border: Border.all(color: Colors.white.withAlpha(100), width: 3),
-              image: const DecorationImage(
-                image: NetworkImage('https://ui-avatars.com/api/?name=Mayank+Tiwari&background=E5F0FF&color=0052CC&size=128'),
-              ),
+            ),
+            alignment: Alignment.center,
+            child: Text(
+              session == null ? 'MT' : session.username.characters.first.toUpperCase(),
+              style: const TextStyle(
+                  color: AppTheme.primaryBlue,
+                  fontSize: 26,
+                  fontWeight: FontWeight.w900),
             ),
           ),
           const SizedBox(width: 20),
@@ -120,13 +143,13 @@ class ProfileScreen extends StatelessWidget {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                const Text(
-                  'Mayank Tiwari',
-                  style: TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.w900),
+                Text(
+                  session?.username ?? 'Mayank Tiwari',
+                  style: const TextStyle(color: Colors.white, fontSize: 22, fontWeight: FontWeight.w900),
                 ),
                 const SizedBox(height: 4),
                 Text(
-                  '+91 98765 43210',
+                  session == null ? '+91 98765 43210' : 'Signed in as staff',
                   style: TextStyle(color: Colors.white.withAlpha(200), fontSize: 14),
                 ),
                 const SizedBox(height: 8),
@@ -137,9 +160,9 @@ class ProfileScreen extends StatelessWidget {
                     borderRadius: BorderRadius.circular(8),
                     border: Border.all(color: Colors.greenAccent.withAlpha(80)),
                   ),
-                  child: const Text(
-                    'Pro Commuter',
-                    style: TextStyle(color: Colors.greenAccent, fontSize: 10, fontWeight: FontWeight.bold),
+                  child: Text(
+                    session?.roleLabel ?? 'Pro Commuter',
+                    style: const TextStyle(color: Colors.greenAccent, fontSize: 10, fontWeight: FontWeight.bold),
                   ),
                 ),
               ],

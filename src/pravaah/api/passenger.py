@@ -365,10 +365,10 @@ def trip_forecast(request: Request, trip_id: str) -> TripForecastResponse:
 #: many minutes of travel a passenger will trade to avoid one unit of crowding
 #: or one transfer.
 PROFILES: dict[str, dict[str, float]] = {
-    "fastest": {"crowd": 0.5, "transfer": 4.0, "wait": 1.0},
-    "least_crowded": {"crowd": 14.0, "transfer": 6.0, "wait": 1.0},
-    "most_reliable": {"crowd": 2.0, "transfer": 25.0, "wait": 1.0},
-    "balanced": {"crowd": 6.0, "transfer": 8.0, "wait": 1.0},
+    "fastest": {"crowd": 0.5, "transfer": 4.0, "wait": 1.0, "uncertainty": 0.0},
+    "least_crowded": {"crowd": 40.0, "transfer": 6.0, "wait": 1.0, "uncertainty": 2.0},
+    "most_reliable": {"crowd": 4.0, "transfer": 25.0, "wait": 1.0, "uncertainty": 30.0},
+    "balanced": {"crowd": 14.0, "transfer": 8.0, "wait": 1.0, "uncertainty": 8.0},
 }
 
 #: How far a passenger will walk to a stop, metres.
@@ -494,16 +494,11 @@ def plan(
             if resources.forecaster
             else None
         )
-        crowd_ordinal = (
-            quantiles.p50_class.ordinal
-            if quantiles and quantiles.p50_class.ordinal is not None
-            else 0
-        )
-
         score = (
             ride_min
             + wait_min * weights["wait"]
-            + crowd_ordinal * weights["crowd"]
+            + _crowd_cost(quantiles) * weights["crowd"]
+            + _uncertainty_cost(quantiles) * weights["uncertainty"]
         )
 
         reasons: list[str] = []
@@ -592,6 +587,35 @@ def _unknown_band():
     from ..models.crowd import CrowdQuantiles
 
     return CrowdQuantiles.unknown()
+
+
+def _crowd_cost(quantiles) -> float:
+    """Predicted crowding cost in [0, 1] (SOLUTION.md 10.2, `predicted_crowding_cost`).
+
+    The continuous p50 ratio, not the ordinal class. Two departures at 45% and
+    70% of capacity both sit in STANDING_ROOM_ONLY, so scoring the class made
+    them indistinguishable and "least crowded" could never reorder anything.
+    An unknown forecast costs a mid value: neither rewarded nor condemned for
+    being unmeasured.
+    """
+    if quantiles is None or quantiles.p50_ratio is None:
+        return 0.5
+    return max(0.0, min(1.0, quantiles.p50_ratio))
+
+
+def _uncertainty_cost(quantiles) -> float:
+    """Width of the p10-p90 band, in [0, 1] (SOLUTION.md 10.2, `uncertainty_penalty`).
+
+    A wide band means the model does not know what this bus will look like.
+    "Most reliable" is exactly the preference that should avoid that, which it
+    could not do while the term was missing from the score.
+    """
+    if quantiles is None or quantiles.capacity in (None, 0):
+        return 1.0
+    lo, hi = quantiles.p10_onboard, quantiles.p90_onboard
+    if lo is None or hi is None:
+        return 1.0
+    return max(0.0, min(1.0, (hi - lo) / quantiles.capacity))
 
 
 def _readable(occupancy: OccupancyClass) -> str:
@@ -750,18 +774,24 @@ def _transfer_options(
             ride_min = max(1, int(((arr1 - dep1) + (arr2 - dep2)) / 60))
             wait_min = int(wait / 60)
 
-            crowd1 = _forecast_at(forecaster, departure, tz, seq1, cur, feed_version_id, t1)
+            crowd1 = _forecast_at(
+                forecaster, departure, tz, seq1, cur, feed_version_id, t1, r1
+            )
             crowd2 = _forecast_at(
                 forecaster, midnight + timedelta(seconds=int(dep2)), tz, seq2,
-                cur, feed_version_id, t2,
+                cur, feed_version_id, t2, r2,
             )
-            ordinal = max(
-                (c.p50_class.ordinal or 0) for c in (crowd1, crowd2) if c is not None
-            )
+            # The worse of the two legs decides: a journey is as crowded as its
+            # most crowded bus, not the average of them.
+            crowd_cost = max(_crowd_cost(crowd1), _crowd_cost(crowd2))
+            uncertainty = max(_uncertainty_cost(crowd1), _uncertainty_cost(crowd2))
 
+            # No separate wait term: total_min already spans the transfer wait,
+            # so charging it again would penalise the change twice.
             score = (
                 total_min
-                + ordinal * weights["crowd"]
+                + crowd_cost * weights["crowd"]
+                + uncertainty * weights["uncertainty"]
                 + weights["transfer"]  # one change
             )
 
@@ -810,13 +840,21 @@ def _transfer_options(
     return sorted(best.values(), key=lambda o: o.score)[:4]
 
 
-def _forecast_at(forecaster, when, tz, sequence: int, cur, feed_version_id: int, trip_id: str):
-    """Crowd band for boarding `trip_id` at `sequence`."""
+def _forecast_at(
+    forecaster, when, tz, sequence: int, cur, feed_version_id: int,
+    trip_id: str, route_id: str | None = None,
+):
+    """Crowd band for boarding `trip_id` at `sequence`.
+
+    `route_id` matters: the baseline holds route-hour and route-hour-position
+    tables, and without it every leg fell back to the hour-only cell. That made
+    each transfer leg return an identical band regardless of which bus it was.
+    """
     if forecaster is None:
         return None
     total = _trip_length(cur, feed_version_id, trip_id)
     position = (sequence - 1) / max(total - 1, 1)
-    return forecaster.predict(when.astimezone(tz).hour, position)
+    return forecaster.predict(when.astimezone(tz).hour, position, route_id)
 
 
 _TRIP_LENGTHS: dict[tuple[int, str], int] = {}

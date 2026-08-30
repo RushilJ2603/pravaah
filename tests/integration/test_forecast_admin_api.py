@@ -238,6 +238,11 @@ class FakeCursor:
                     8 * 3600 + 20 * 60,
                 ),
             ]
+        elif "WITH board AS" in normalized:
+            # One-transfer candidate search. This fixture deliberately offers no
+            # transfer journeys: these tests are about how the ranker orders
+            # direct options, and a stubbed transfer would only add noise.
+            self.rows = []
         else:  # pragma: no cover - makes new production queries fail loudly
             raise AssertionError(f"unexpected SQL in API test: {normalized}")
 

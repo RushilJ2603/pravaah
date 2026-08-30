@@ -34,7 +34,16 @@ from pravaah.contracts.events import OccupancyClass, OccupancyObservation
 from pravaah.contracts.provenance import Provenance, SourceType
 
 SECRET = b"test-only-secret-that-is-at-least-32-bytes"
-NOW = datetime.now(UTC).replace(microsecond=0)
+def _now() -> datetime:
+    """Current time, read per use -- never frozen at import.
+
+    This was a module-level constant, which made four tests fail whenever the
+    whole suite ran: collection happens once, the constant aged past the live
+    staleness window during the six minutes of other tests, and the API then
+    correctly rejected the timestamp. The product was right; the fixture was
+    stale.
+    """
+    return datetime.now(UTC).replace(microsecond=0)
 
 
 class UniqueViolation(Exception):
@@ -78,7 +87,7 @@ class FakeCursor:
                 "device_id": device_id,
                 "ended": False,
             }
-            self.row = (shift_id, NOW)
+            self.row = (shift_id, _now())
         elif sql.startswith("SELECT vehicle_id, trip_id, route_id"):
             shift_id, user_id, city_id = params
             shift = self.database.shifts.get(shift_id)
@@ -203,12 +212,12 @@ def test_password_hash_is_salted_and_verifies():
 
 def test_token_is_signed_and_expires():
     identity = StaffIdentity(7, "CONDUCTOR", "test-city")
-    token = issue_access_token(identity, secret=SECRET, issued_at=NOW)
+    token = issue_access_token(identity, secret=SECRET, issued_at=_now())
     assert decode_access_token(
-        token, secret=SECRET, current_time=NOW + timedelta(hours=1)
+        token, secret=SECRET, current_time=_now() + timedelta(hours=1)
     ) == identity
     with pytest.raises(HTTPException) as expired:
-        decode_access_token(token, secret=SECRET, current_time=NOW + timedelta(hours=8))
+        decode_access_token(token, secret=SECRET, current_time=_now() + timedelta(hours=8))
     assert expired.value.status_code == 401
 
 
@@ -242,7 +251,7 @@ def test_vehicle_claim_is_unique_and_owned_position_is_real_operator(harness):
         lon=77.2,
         accuracy_m=8.0,
         speed_mps=9.0,
-        timestamp=NOW,
+        timestamp=_now(),
     )
     with pytest.raises(HTTPException) as not_owned:
         report_position(shift.shift_id, position, request, other)
@@ -265,7 +274,7 @@ def test_conductor_occupancy_needs_active_shift_and_end_stops_writes(harness):
         trip_id="trip-1",
         vehicle_id="bus-1",
         occupancy_class=OccupancyClass.STANDING_ROOM_ONLY,
-        reported_at=NOW,
+        reported_at=_now(),
     )
     with pytest.raises(HTTPException) as inactive:
         report_occupancy(report, request, owner)
@@ -295,7 +304,7 @@ def test_conductor_occupancy_needs_active_shift_and_end_stops_writes(harness):
                 lon=77.2,
                 accuracy_m=8.0,
                 speed_mps=None,
-                timestamp=NOW,
+                timestamp=_now(),
             ),
             request,
             owner,
@@ -310,7 +319,7 @@ def test_anonymous_occupancy_remains_crowdsourced(harness):
             trip_id="trip-1",
             vehicle_id="bus-1",
             occupancy_class=OccupancyClass.FEW_SEATS_AVAILABLE,
-            reported_at=NOW,
+            reported_at=_now(),
         ),
         request,
         None,
@@ -340,10 +349,10 @@ def test_live_write_timestamps_must_be_aware_and_recent(harness):
             lat=28.6,
             lon=77.2,
             accuracy_m=8.0,
-            timestamp=NOW.replace(tzinfo=None),
+            timestamp=_now().replace(tzinfo=None),
         )
 
-    for timestamp in (NOW + timedelta(minutes=2), NOW - timedelta(minutes=3)):
+    for timestamp in (_now() + timedelta(minutes=2), _now() - timedelta(minutes=3)):
         with pytest.raises(HTTPException):
             report_position(
                 shift.shift_id,
@@ -371,7 +380,7 @@ def test_conductor_report_does_not_hide_fresher_machine_count(harness):
         request,
         owner,
     )
-    machine_time = NOW + timedelta(minutes=1)
+    machine_time = _now() + timedelta(minutes=1)
     machine = OccupancyObservation(
         city_id="test-city",
         vehicle_id="bus-1",
@@ -394,7 +403,7 @@ def test_conductor_report_does_not_hide_fresher_machine_count(harness):
             trip_id="trip-1",
             vehicle_id="bus-1",
             occupancy_class=OccupancyClass.EMPTY,
-            reported_at=NOW,
+            reported_at=_now(),
         ),
         request,
         owner,

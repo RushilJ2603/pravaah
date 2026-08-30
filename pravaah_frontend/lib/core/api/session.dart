@@ -10,10 +10,22 @@ import 'api_client.dart';
 /// backend decides what a token may do from the role baked into it, never from
 /// anything this client claims.
 class StaffSession {
-  const StaffSession({required this.token, required this.role});
+  const StaffSession({
+    required this.token,
+    required this.role,
+    required this.username,
+  });
 
   final String token;
   final String role;
+
+  /// The username that was authenticated. Kept so the app can name who is
+  /// signed in without inventing a persona; the backend does not return it.
+  final String username;
+
+  /// Title-case role for display: OPERATOR -> Operator.
+  String get roleLabel =>
+      role.isEmpty ? role : role[0] + role.substring(1).toLowerCase();
 
   bool get isOperator => role == 'OPERATOR';
   bool get isConductor => role == 'CONDUCTOR';
@@ -36,6 +48,7 @@ class SessionController extends StateNotifier<StaffSession?> {
     state = StaffSession(
       token: json['access_token'] as String,
       role: json['role'] as String,
+      username: username,
     );
   }
 
