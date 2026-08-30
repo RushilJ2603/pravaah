@@ -1,12 +1,15 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../../theme/app_theme.dart';
 import 'widgets/mini_live_map.dart';
+import '../../journey/providers/recent_searches_provider.dart';
 
-class DashboardScreen extends StatelessWidget {
+class DashboardScreen extends ConsumerWidget {
   const DashboardScreen({super.key});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final recentDestinations = ref.watch(recentSearchesProvider);
     return Scaffold(
       body: SafeArea(
         bottom: false,
@@ -80,9 +83,9 @@ class DashboardScreen extends StatelessWidget {
                       style: Theme.of(context).textTheme.titleLarge,
                     ),
                     const SizedBox(height: 16),
-                    _buildRecentDestination(context, Icons.home, 'Home', 'NITK Campus, Surathkal'),
-                    _buildRecentDestination(context, Icons.work, 'Work', 'Mangalore City Center'),
-                    _buildRecentDestination(context, Icons.history, 'Udupi Bus Stand', 'Udupi'),
+                    ...recentDestinations.map((place) => 
+                      _buildRecentDestination(context, Icons.history, place.name, 'Delhi')
+                    ),
                     
                     const SizedBox(height: 120), // Bottom padding for floating nav bar
                   ],
@@ -96,24 +99,24 @@ class DashboardScreen extends StatelessWidget {
   }
 
   Widget _buildRecentDestination(BuildContext context, IconData icon, String title, String subtitle) {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 12),
-      decoration: BoxDecoration(
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 12),
+      child: Material(
         color: Colors.white,
         borderRadius: BorderRadius.circular(16),
-        boxShadow: const [
-          BoxShadow(color: AppTheme.cardShadow, blurRadius: 4, offset: Offset(0, 2)),
-        ],
-      ),
-      child: ListTile(
-        leading: CircleAvatar(
-          backgroundColor: AppTheme.background,
-          child: Icon(icon, color: AppTheme.primaryBlue),
+        shadowColor: AppTheme.cardShadow,
+        elevation: 2,
+        child: ListTile(
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          leading: CircleAvatar(
+            backgroundColor: AppTheme.background,
+            child: Icon(icon, color: AppTheme.primaryBlue),
+          ),
+          title: Text(title, style: const TextStyle(fontWeight: FontWeight.bold)),
+          subtitle: Text(subtitle),
+          trailing: const Icon(Icons.arrow_forward_ios, size: 16, color: AppTheme.textSecondary),
+          onTap: () {},
         ),
-        title: Text(title, style: const TextStyle(fontWeight: FontWeight.bold)),
-        subtitle: Text(subtitle),
-        trailing: const Icon(Icons.arrow_forward_ios, size: 16, color: AppTheme.textSecondary),
-        onTap: () {},
       ),
     );
   }

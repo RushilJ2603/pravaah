@@ -6,6 +6,7 @@ import '../../../core/api/places.dart';
 import '../../../core/api/error_helper.dart';
 import '../../../core/api/journey_helpers.dart';
 import '../providers/plan_provider.dart';
+import '../providers/recent_searches_provider.dart';
 import 'widgets/journey_live_map.dart';
 
 enum JourneyState { initial, searching, results, active }
@@ -55,6 +56,9 @@ class _JourneyScreenState extends ConsumerState<JourneyScreen> {
       );
       return;
     }
+
+    // Save to recent destinations
+    ref.read(recentSearchesProvider.notifier).addSearch(destination);
 
     setState(() {
       _query = PlanQuery(

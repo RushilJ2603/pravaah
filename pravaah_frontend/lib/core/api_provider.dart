@@ -1,13 +1,15 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:pravaah_api/api.dart';
 
+import 'app_config.dart';
+
 /// Filled in by staff sign-in (`session.dart`); empty means no bearer token
 /// is sent. One instance for the app's lifetime so every API client shares it.
 final bearerAuthProvider = Provider<HttpBearerAuth>((ref) => HttpBearerAuth());
 
 final apiClientProvider = Provider<ApiClient>((ref) {
   return ApiClient(
-    basePath: 'https://strict-affiliation-ranked-gates.trycloudflare.com',
+    basePath: AppConfig.backendUrl,
     authentication: ref.watch(bearerAuthProvider),
   );
 });

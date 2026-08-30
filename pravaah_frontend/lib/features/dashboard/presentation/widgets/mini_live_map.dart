@@ -7,6 +7,7 @@ import 'package:latlong2/latlong.dart';
 import 'package:geolocator/geolocator.dart';
 import '../../providers/vehicle_provider.dart';
 import '../../../../theme/app_theme.dart';
+import '../../../../core/app_config.dart';
 import 'package:pravaah_api/api.dart';
 import '../../../../core/api/places.dart';
 
@@ -77,7 +78,7 @@ class _MiniLiveMapState extends ConsumerState<MiniLiveMap> {
   DelhiPlace _getClosestPlace(LatLng point) {
     DelhiPlace? closest;
     double minDistance = double.infinity;
-    const distance = Distance();
+    final distance = Distance();
     for (final p in kDelhiPlaces) {
       final d = distance.as(LengthUnit.Meter, point, LatLng(p.lat, p.lon));
       if (d < minDistance) {
@@ -125,7 +126,7 @@ class _MiniLiveMapState extends ConsumerState<MiniLiveMap> {
     try {
       // Call the API from bus position to nearby destination
       final planUrl = Uri.parse(
-        'https://strict-affiliation-ranked-gates.trycloudflare.com/v1/plan'
+        '${AppConfig.backendUrl}/v1/plan'
         '?from_lat=${v.lat}&from_lon=${v.lon}&to_lat=${nearbyDest.lat}&to_lon=${nearbyDest.lon}');
       final planResp = await http.get(planUrl);
       
